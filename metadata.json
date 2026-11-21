@@ -1,0 +1,6 @@
+{
+  "name": "CandyCBT - Sistem Ujian Berbasis Komputer",
+  "description": "Aplikasi Computer-Based Test (CBT) lengkap dengan import soal Excel, ujian berbasis web, pemantauan kecurangan otomatis real-time, manajemen server, dan laporan hasil ujian PDF instan.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

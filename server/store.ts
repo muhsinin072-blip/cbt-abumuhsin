@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { hashPassword } from './auth.ts';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { ensureSchema, pool } from './db.js';
+import { hashPassword } from './auth.js';
 import type {
   AdminAccount,
   AttendanceRecord,
@@ -14,7 +16,7 @@ import type {
   Student,
   TeacherAccount,
   ViolationLog,
-} from '../src/types/cbt.ts';
+} from '../src/types/cbt.js';
 
 export interface CbtDatabase {
   settings: SchoolSettings;
@@ -671,102 +673,321 @@ function createInitialSeed(): CbtDatabase {
   };
 }
 
+const COLLECTIONS = [
+  'admins',
+  'teachers',
+  'students',
+  'banks',
+  'exams',
+  'sessions',
+  'violations',
+  'broadcasts',
+  'attendance',
+] as const;
+
+type CollectionName = (typeof COLLECTIONS)[number];
+
+const SETTINGS_COLLECTION = 'settings';
+const SETTINGS_ID = 'main';
+
+export interface PendingEvent {
+  audience: string;
+  event: string;
+  payload: unknown;
+}
+
+interface SnapshotEntry {
+  json: string;
+  pos: number;
+}
+
+export interface StoreContext {
+  db: CbtDatabase;
+  snapshot: Map<string, SnapshotEntry>;
+  events: PendingEvent[];
+  presence: { students: number; staff: number };
+  sizeBytes: number;
+}
+
+interface DocRow {
+  collection: string;
+  id: string;
+  pos: number;
+  data: unknown;
+}
+
+const contextStorage = new AsyncLocalStorage<StoreContext>();
+
+function docKey(collection: string, id: string): string {
+  return `${collection}\u0000${id}`;
+}
+
+function normalizeDb(parsed: CbtDatabase): CbtDatabase {
+  parsed.settings = {
+    city: 'Kota Nusantara',
+    themeColor: 'teal',
+    sidebarStyle: 'dark',
+    schoolLogo: '',
+    principalSignature: '',
+    portalSlides: [],
+    ...parsed.settings,
+  };
+  for (const name of COLLECTIONS) {
+    if (!Array.isArray(parsed[name])) {
+      (parsed as unknown as Record<CollectionName, unknown[]>)[name] = [];
+    }
+  }
+  if (parsed.teachers.length === 0) {
+    parsed.teachers = createDefaultTeachers();
+  }
+  for (const bank of parsed.banks) {
+    if (!bank.teacherId && bank.teacherName) {
+      const matched = parsed.teachers.find(
+        (t) => t.fullName.trim().toLowerCase() === bank.teacherName.trim().toLowerCase()
+      );
+      if (matched) {
+        bank.teacherId = matched.id;
+      }
+    }
+  }
+  return parsed;
+}
+
+function readLegacySeedFile(): CbtDatabase | null {
+  try {
+    const legacyFile = path.resolve(process.cwd(), 'data', 'cbt-store.json');
+    if (!fs.existsSync(legacyFile)) {
+      return null;
+    }
+    const parsed = JSON.parse(fs.readFileSync(legacyFile, 'utf8')) as CbtDatabase;
+    if (parsed && parsed.settings && Array.isArray(parsed.students)) {
+      return parsed;
+    }
+  } catch (err) {
+    console.error('Gagal membaca data/cbt-store.json, memakai seed bawaan:', err);
+  }
+  return null;
+}
+
+// Keeps existing rows' sort keys stable so push/unshift only writes the new row.
+function assignPositions(collection: string, items: { id?: unknown }[], snapshot: Map<string, SnapshotEntry>): number[] {
+  const known = items.map((item) =>
+    item && typeof item.id === 'string' ? snapshot.get(docKey(collection, item.id))?.pos : undefined
+  );
+
+  let last = -Infinity;
+  for (const p of known) {
+    if (p === undefined) continue;
+    if (p <= last) {
+      return items.map((_, i) => i);
+    }
+    last = p;
+  }
+
+  const result: number[] = new Array(items.length);
+  let i = 0;
+  while (i < items.length) {
+    const knownPos = known[i];
+    if (knownPos !== undefined) {
+      result[i] = knownPos;
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < items.length && known[j] === undefined) j++;
+    const prev = i > 0 ? result[i - 1] : undefined;
+    const next = j < items.length ? known[j] : undefined;
+    const count = j - i;
+    for (let k = 0; k < count; k++) {
+      if (prev === undefined && next === undefined) {
+        result[i + k] = i + k;
+      } else if (prev === undefined) {
+        result[i + k] = (next as number) - (count - k);
+      } else if (next === undefined) {
+        result[i + k] = prev + k + 1;
+      } else {
+        result[i + k] = prev + ((next - prev) * (k + 1)) / (count + 1);
+      }
+    }
+    i = j;
+  }
+  return result;
+}
+
 class StoreManager {
-  private db: CbtDatabase;
+  async load(): Promise<StoreContext> {
+    await ensureSchema();
+    const [docsRes, presenceRes] = await Promise.all([
+      pool.query<DocRow>('SELECT collection, id, pos, data FROM cbt_docs ORDER BY collection, pos, id'),
+      pool.query<{ role: string; n: number }>(
+        `SELECT role, count(*)::int AS n FROM cbt_presence WHERE seen_at > now() - interval '45 seconds' GROUP BY role`
+      ),
+    ]);
 
-  constructor() {
-    this.db = this.loadFromDisk();
+    const presence = { students: 0, staff: 0 };
+    for (const row of presenceRes.rows) {
+      if (row.role === 'student') presence.students += row.n;
+      else presence.staff += row.n;
+    }
+
+    const snapshot = new Map<string, SnapshotEntry>();
+
+    if (docsRes.rows.length === 0) {
+      const seed = normalizeDb(readLegacySeedFile() || createInitialSeed());
+      const ctx: StoreContext = { db: seed, snapshot, events: [], presence, sizeBytes: 0 };
+      await this.flush(ctx);
+      return ctx;
+    }
+
+    const draft: Record<string, unknown[]> = {};
+    for (const name of COLLECTIONS) draft[name] = [];
+    let settings: SchoolSettings | null = null;
+    let sizeBytes = 0;
+
+    for (const row of docsRes.rows) {
+      const json = JSON.stringify(row.data);
+      sizeBytes += json.length;
+      snapshot.set(docKey(row.collection, row.id), { json, pos: Number(row.pos) });
+      if (row.collection === SETTINGS_COLLECTION) {
+        settings = row.data as SchoolSettings;
+      } else if (draft[row.collection]) {
+        draft[row.collection].push(row.data);
+      }
+    }
+
+    const db = normalizeDb({
+      ...(draft as unknown as Omit<CbtDatabase, 'settings'>),
+      settings: settings || createInitialSeed().settings,
+    } as CbtDatabase);
+
+    return { db, snapshot, events: [], presence, sizeBytes };
   }
 
-  private loadFromDisk(): CbtDatabase {
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf8');
-        const parsed = JSON.parse(raw) as CbtDatabase;
-        if (parsed && parsed.settings && Array.isArray(parsed.students)) {
-          parsed.settings = {
-            city: 'Kota Nusantara',
-            themeColor: 'teal',
-            sidebarStyle: 'dark',
-            schoolLogo: '',
-            principalSignature: '',
-            portalSlides: [],
-            ...parsed.settings,
-          };
-          if (!Array.isArray(parsed.attendance)) {
-            parsed.attendance = [];
-          }
-          let migrated = false;
-          if (!Array.isArray(parsed.teachers) || parsed.teachers.length === 0) {
-            parsed.teachers = createDefaultTeachers();
-            migrated = true;
-          }
-          if (Array.isArray(parsed.banks)) {
-            for (const bank of parsed.banks) {
-              if (!bank.teacherId && bank.teacherName) {
-                const matched = parsed.teachers.find(
-                  (t) => t.fullName.trim().toLowerCase() === bank.teacherName.trim().toLowerCase()
-                );
-                if (matched) {
-                  bank.teacherId = matched.id;
-                  migrated = true;
-                }
-              }
-            }
-          }
-          if (migrated) {
-            this.saveToDisk(parsed);
-          }
-          return parsed;
+  async flush(ctx: StoreContext): Promise<void> {
+    const upserts: DocRow[] = [];
+    const nextSnapshot = new Map<string, SnapshotEntry>();
+
+    const settingsKey = docKey(SETTINGS_COLLECTION, SETTINGS_ID);
+    const settingsJson = JSON.stringify(ctx.db.settings);
+    nextSnapshot.set(settingsKey, { json: settingsJson, pos: 0 });
+    if (ctx.snapshot.get(settingsKey)?.json !== settingsJson) {
+      upserts.push({ collection: SETTINGS_COLLECTION, id: SETTINGS_ID, pos: 0, data: ctx.db.settings });
+    }
+
+    for (const name of COLLECTIONS) {
+      const items = (Array.isArray(ctx.db[name]) ? ctx.db[name] : []) as unknown as { id?: unknown }[];
+      const positions = assignPositions(name, items, ctx.snapshot);
+      items.forEach((item, idx) => {
+        if (!item || typeof item.id !== 'string' || !item.id) return;
+        const key = docKey(name, item.id);
+        if (nextSnapshot.has(key)) return;
+        const json = JSON.stringify(item);
+        const pos = positions[idx];
+        nextSnapshot.set(key, { json, pos });
+        const prev = ctx.snapshot.get(key);
+        if (!prev || prev.json !== json || prev.pos !== pos) {
+          upserts.push({ collection: name, id: item.id, pos, data: item });
         }
-      }
-    } catch (err) {
-      console.error('Failed loading CBT store, initializing fresh seed:', err);
+      });
     }
-    const seed = createInitialSeed();
-    this.saveToDisk(seed);
-    return seed;
+
+    const deletes: { collection: string; id: string }[] = [];
+    for (const key of ctx.snapshot.keys()) {
+      if (!nextSnapshot.has(key)) {
+        const [collection, id] = key.split('\u0000');
+        deletes.push({ collection, id });
+      }
+    }
+
+    const events = ctx.events.splice(0);
+    if (upserts.length === 0 && deletes.length === 0 && events.length === 0) {
+      return;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (upserts.length > 0) {
+        await client.query(
+          `INSERT INTO cbt_docs (collection, id, pos, data)
+           SELECT x.collection, x.id, x.pos, x.data
+           FROM jsonb_to_recordset($1::jsonb) AS x(collection text, id text, pos double precision, data jsonb)
+           ON CONFLICT (collection, id) DO UPDATE
+           SET pos = EXCLUDED.pos, data = EXCLUDED.data, updated_at = now()`,
+          [JSON.stringify(upserts)]
+        );
+      }
+      if (deletes.length > 0) {
+        await client.query(
+          `DELETE FROM cbt_docs d
+           USING jsonb_to_recordset($1::jsonb) AS x(collection text, id text)
+           WHERE d.collection = x.collection AND d.id = x.id`,
+          [JSON.stringify(deletes)]
+        );
+      }
+      if (events.length > 0) {
+        await client.query(
+          `INSERT INTO cbt_events (audience, event, payload)
+           SELECT x.audience, x.event, x.payload
+           FROM jsonb_to_recordset($1::jsonb) AS x(audience text, event text, payload jsonb)`,
+          [JSON.stringify(events.map((e) => ({ ...e, payload: e.payload ?? null })))]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      ctx.events.unshift(...events);
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    ctx.snapshot = nextSnapshot;
+    ctx.sizeBytes = Array.from(nextSnapshot.values()).reduce((sum, e) => sum + e.json.length, 0);
+
+    if (Math.random() < 0.02) {
+      pool
+        .query(`DELETE FROM cbt_events WHERE created_at < now() - interval '2 hours'`)
+        .catch((err) => console.error('Gagal membersihkan cbt_events:', err));
+    }
   }
 
-  private saveToDisk(data: CbtDatabase): void {
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      const tempFile = `${DB_FILE}.tmp`;
-      fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf8');
-      fs.renameSync(tempFile, DB_FILE);
-    } catch (err) {
-      console.error('Error persisting CBT store:', err);
+  run<T>(ctx: StoreContext, fn: () => T): T {
+    return contextStorage.run(ctx, fn);
+  }
+
+  private current(): StoreContext {
+    const ctx = contextStorage.getStore();
+    if (!ctx) {
+      throw new Error('Store context tidak tersedia di luar request API.');
     }
+    return ctx;
   }
 
   getDb(): CbtDatabase {
-    return this.db;
+    return this.current().db;
   }
 
-  commit(): void {
-    this.saveToDisk(this.db);
-  }
+  // Persistence happens once per request in flush(); kept so route handlers stay unchanged.
+  commit(): void {}
 
   replaceAll(nextDb: CbtDatabase): void {
-    this.db = nextDb;
-    this.saveToDisk(this.db);
+    this.current().db = normalizeDb(nextDb);
+  }
+
+  emit(audience: string, event: string, payload: unknown): void {
+    const ctx = contextStorage.getStore();
+    if (ctx) {
+      ctx.events.push({ audience, event, payload });
+    }
+  }
+
+  getPresence(): { students: number; staff: number } {
+    return this.current().presence;
   }
 
   getDbFileSizeKb(): number {
-    try {
-      if (fs.existsSync(DB_FILE)) {
-        const stat = fs.statSync(DB_FILE);
-        return Math.round((stat.size / 1024) * 10) / 10;
-      }
-    } catch {
-      // ignore
-    }
-    return 0;
+    return Math.round((this.current().sizeBytes / 1024) * 10) / 10;
   }
 }
 

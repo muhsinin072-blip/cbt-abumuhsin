@@ -1,14 +1,47 @@
 import crypto from 'node:crypto';
-import type { UserRole } from '../src/types/cbt.ts';
+import type { UserRole } from '../src/types/cbt.js';
+import { ensureSchema, pool } from './db.js';
 
-const EPHEMERAL_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
+let sharedSecret: string | null = null;
+let sharedSecretLoading: Promise<string> | null = null;
 
-function getSigningSecret(): string {
+// Serverless instances do not share memory, so the token signing secret must be
+// identical everywhere: use SESSION_SECRET when set, otherwise one stored in the database.
+export function initSigningSecret(): Promise<string> {
   const envSecret = process.env.SESSION_SECRET?.trim();
   if (envSecret && envSecret.length >= 16) {
-    return envSecret;
+    sharedSecret = envSecret;
+    return Promise.resolve(envSecret);
   }
-  return EPHEMERAL_FALLBACK_SECRET;
+  if (sharedSecret) {
+    return Promise.resolve(sharedSecret);
+  }
+  if (!sharedSecretLoading) {
+    sharedSecretLoading = (async () => {
+      await ensureSchema();
+      const candidate = crypto.randomBytes(32).toString('hex');
+      await pool.query(
+        `INSERT INTO cbt_meta (key, value) VALUES ('session_secret', $1) ON CONFLICT (key) DO NOTHING`,
+        [candidate]
+      );
+      const { rows } = await pool.query<{ value: string }>(
+        `SELECT value FROM cbt_meta WHERE key = 'session_secret'`
+      );
+      sharedSecret = rows[0]?.value || candidate;
+      return sharedSecret;
+    })().catch((err) => {
+      sharedSecretLoading = null;
+      throw err;
+    });
+  }
+  return sharedSecretLoading;
+}
+
+function getSigningSecret(): string {
+  if (!sharedSecret) {
+    throw new Error('Signing secret belum dimuat. Panggil initSigningSecret() terlebih dahulu.');
+  }
+  return sharedSecret;
 }
 
 export function hashPassword(password: string): string {

@@ -56,61 +56,104 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
   return (await res.text()) as unknown as T;
 }
 
+interface RealtimeListener {
+  onEvent: (event: string, payload: unknown) => void;
+  onStatusChange?: (connected: boolean) => void;
+}
+
+const POLL_INTERVAL_MS = 3000;
+const realtimeListeners = new Set<RealtimeListener>();
+let realtimeCursor: number | null = null;
+let realtimeToken = '';
+let realtimeTimer: number | null = null;
+let realtimeInFlight = false;
+let realtimeConnected = false;
+
+function setRealtimeConnected(connected: boolean): void {
+  if (realtimeConnected === connected) return;
+  realtimeConnected = connected;
+  for (const listener of realtimeListeners) {
+    listener.onStatusChange?.(connected);
+  }
+}
+
+function scheduleRealtimePoll(delay = POLL_INTERVAL_MS): void {
+  if (realtimeTimer !== null) {
+    window.clearTimeout(realtimeTimer);
+  }
+  realtimeTimer = window.setTimeout(pollRealtime, delay);
+}
+
+async function pollRealtime(): Promise<void> {
+  realtimeTimer = null;
+  if (realtimeListeners.size === 0 || realtimeInFlight) return;
+  if (!memoryToken) {
+    setRealtimeConnected(false);
+    scheduleRealtimePoll();
+    return;
+  }
+  if (memoryToken !== realtimeToken) {
+    realtimeToken = memoryToken;
+    realtimeCursor = null;
+  }
+
+  realtimeInFlight = true;
+  try {
+    const res = await apiFetch<{ cursor: number; events: { event: string; payload: unknown }[] }>(
+      `/api/events?after=${realtimeCursor ?? -1}`
+    );
+    realtimeCursor = res.cursor;
+    setRealtimeConnected(true);
+    for (const item of res.events) {
+      for (const listener of Array.from(realtimeListeners)) {
+        try {
+          listener.onEvent(item.event, item.payload);
+        } catch (err) {
+          console.error('Realtime listener error:', err);
+        }
+      }
+    }
+  } catch {
+    setRealtimeConnected(false);
+  } finally {
+    realtimeInFlight = false;
+    if (realtimeListeners.size > 0) {
+      scheduleRealtimePoll();
+    }
+  }
+}
+
+// Same interface as the former WebSocket client; realtime events are delivered by
+// short polling because Vercel Functions cannot keep WebSocket connections open.
 export function createCbtWebSocket(
   onEvent: (event: string, payload: unknown) => void,
   onStatusChange?: (connected: boolean) => void
 ): { send: (event: string, payload?: unknown) => void; close: () => void } {
-  let ws: WebSocket | null = null;
-  let closedManually = false;
-  let reconnectTimer: number | null = null;
-
-  const connect = () => {
-    if (closedManually || !memoryToken) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(memoryToken)}`;
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      onStatusChange?.(true);
-    };
-
-    ws.onmessage = (evt) => {
-      try {
-        const parsed = JSON.parse(evt.data) as { event?: string; payload?: unknown };
-        if (parsed.event) {
-          onEvent(parsed.event, parsed.payload);
-        }
-      } catch {
-        // ignore invalid message
-      }
-    };
-
-    ws.onclose = () => {
-      onStatusChange?.(false);
-      if (!closedManually) {
-        reconnectTimer = window.setTimeout(connect, 3000);
-      }
-    };
-
-    ws.onerror = () => {
-      ws?.close();
-    };
-  };
-
-  connect();
+  const listener: RealtimeListener = { onEvent, onStatusChange };
+  realtimeListeners.add(listener);
+  if (realtimeConnected) {
+    onStatusChange?.(true);
+  }
+  if (realtimeTimer === null && !realtimeInFlight) {
+    scheduleRealtimePoll(0);
+  }
 
   return {
     send: (event: string, payload?: unknown) => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ event, payload }));
-      }
+      if (!memoryToken) return;
+      apiFetch('/api/events', {
+        method: 'POST',
+        body: JSON.stringify({ event, payload }),
+      }).catch(() => {
+        // heartbeat failures are retried on the next interval
+      });
     },
     close: () => {
-      closedManually = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
+      realtimeListeners.delete(listener);
+      if (realtimeListeners.size === 0 && realtimeTimer !== null) {
+        window.clearTimeout(realtimeTimer);
+        realtimeTimer = null;
       }
-      ws?.close();
     },
   };
 }

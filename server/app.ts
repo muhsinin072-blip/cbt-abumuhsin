@@ -11,15 +11,15 @@ import {
   verifyAuthToken,
   verifyEnvPasscode,
   verifyPasswordHash,
-} from './auth.js';
-import type { TokenPayload } from './auth.js';
+} from './auth.ts';
+import type { TokenPayload } from './auth.ts';
 import {
   calculateSessionScore,
   generateTokenCode,
   store,
-} from './store.js';
-import type { CbtDatabase, StoreContext } from './store.js';
-import { pool } from './db.js';
+} from './store.ts';
+import type { CbtDatabase, StoreContext } from './store.ts';
+import { dbGetEventsAfter, dbGetMaxEventId, dbTouchPresence } from './db.ts';
 import type {
   AdminAccount,
   AttendanceMethod,
@@ -36,7 +36,7 @@ import type {
   TeacherAccount,
   ViolationLog,
   ViolationType,
-} from '../src/types/cbt.js';
+} from '../src/types/cbt.ts';
 
 interface AuthenticatedRequest extends Request {
   user?: TokenPayload;
@@ -69,16 +69,17 @@ function audiencesFor(user: TokenPayload): string[] {
 }
 
 async function touchPresence(user: TokenPayload): Promise<void> {
-  await pool.query(
-    `INSERT INTO cbt_presence (user_id, role, seen_at) VALUES ($1, $2, now())
-     ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, seen_at = now()`,
-    [`${user.role}:${user.sub}`, user.role]
-  );
+  await dbTouchPresence(`${user.role}:${user.sub}`, user.role);
 }
 
 // Every API request runs against a fresh snapshot of the database and writes back
 // only the documents it changed (plus queued realtime events) before responding.
 app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
+  if (req.path === '/health' && req.method === 'GET') {
+    next();
+    return;
+  }
+
   try {
     await initSigningSecret();
   } catch (err) {
@@ -2069,7 +2070,7 @@ function getAttendancePeriodRange(
   dateRaw: unknown,
   monthRaw: unknown
 ): {
-  period: 'daily' | 'weekly' | 'monthly';
+  period: 'daily' | 'weekly' | 'monthly' | 'all';
   date: string;
   month: string;
   startDate: string;
@@ -2077,7 +2078,9 @@ function getAttendancePeriodRange(
 } {
   const today = new Date().toISOString().slice(0, 10);
   const period =
-    periodRaw === 'weekly' || periodRaw === 'monthly' ? periodRaw : 'daily';
+    periodRaw === 'all' || periodRaw === 'weekly' || periodRaw === 'monthly'
+      ? periodRaw
+      : 'daily';
 
   const date =
     typeof dateRaw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw.trim())
@@ -2088,6 +2091,16 @@ function getAttendancePeriodRange(
     typeof monthRaw === 'string' && /^\d{4}-\d{2}$/.test(monthRaw.trim())
       ? monthRaw.trim()
       : date.slice(0, 7);
+
+  if (period === 'all') {
+    return {
+      period: 'all',
+      date,
+      month,
+      startDate: '1970-01-01',
+      endDate: '9999-12-31',
+    };
+  }
 
   if (period === 'weekly') {
     const [y, m, d] = date.split('-').map(Number);
@@ -2143,7 +2156,8 @@ app.get('/api/admin/attendance', requireAuth, requireStaff, (req: AuthenticatedR
 
   const records = db.attendance
     .filter((r) => {
-      const matchDate = r.date >= range.startDate && r.date <= range.endDate;
+      const matchDate =
+        range.period === 'all' || (r.date >= range.startDate && r.date <= range.endDate);
       const matchExam = !examId || examId === 'ALL' ? true : r.examId === examId;
       return matchDate && matchExam;
     })
@@ -2429,23 +2443,18 @@ app.get('/api/events', requireAuth, async (req: AuthenticatedRequest, res) => {
     }
 
     if (!Number.isFinite(afterRaw) || afterRaw < 0) {
-      const { rows } = await pool.query<{ max: string | null }>('SELECT max(id) AS max FROM cbt_events');
-      res.json({ cursor: Number(rows[0]?.max || 0), events: [] });
+      const maxId = await dbGetMaxEventId();
+      res.json({ cursor: maxId, events: [] });
       return;
     }
 
-    const { rows } = await pool.query<{ id: string; event: string; payload: unknown }>(
-      `SELECT id, event, payload FROM cbt_events
-       WHERE id > $1 AND audience = ANY($2::text[])
-       ORDER BY id ASC LIMIT 200`,
-      [afterRaw, audiences]
-    );
+    const rows = await dbGetEventsAfter(afterRaw, audiences);
     let cursor = afterRaw;
     if (rows.length > 0) {
-      cursor = Number(rows[rows.length - 1].id);
+      cursor = rows[rows.length - 1].id;
     } else {
-      const latest = await pool.query<{ max: string | null }>('SELECT max(id) AS max FROM cbt_events');
-      cursor = Math.max(afterRaw, Number(latest.rows[0]?.max || 0));
+      const maxId = await dbGetMaxEventId();
+      cursor = Math.max(afterRaw, maxId);
     }
     res.json({
       cursor,

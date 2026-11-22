@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import type { UserRole } from '../src/types/cbt.js';
-import { ensureSchema, pool } from './db.js';
+import type { UserRole } from '../src/types/cbt.ts';
+import { dbInitSessionSecret } from './db.ts';
 
 let sharedSecret: string | null = null;
 let sharedSecretLoading: Promise<string> | null = null;
@@ -18,16 +18,8 @@ export function initSigningSecret(): Promise<string> {
   }
   if (!sharedSecretLoading) {
     sharedSecretLoading = (async () => {
-      await ensureSchema();
       const candidate = crypto.randomBytes(32).toString('hex');
-      await pool.query(
-        `INSERT INTO cbt_meta (key, value) VALUES ('session_secret', $1) ON CONFLICT (key) DO NOTHING`,
-        [candidate]
-      );
-      const { rows } = await pool.query<{ value: string }>(
-        `SELECT value FROM cbt_meta WHERE key = 'session_secret'`
-      );
-      sharedSecret = rows[0]?.value || candidate;
+      sharedSecret = await dbInitSessionSecret(candidate);
       return sharedSecret;
     })().catch((err) => {
       sharedSecretLoading = null;

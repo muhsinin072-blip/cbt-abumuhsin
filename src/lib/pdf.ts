@@ -300,11 +300,11 @@ export async function generateParticipantCardsPDF(
 ): Promise<void> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const cardWidth = 86;
-  const cardHeight = 48;
+  const cardHeight = 52;
   const marginX = 14;
-  const marginY = 12;
+  const marginY = 10;
   const gapX = 10;
-  const gapY = 5;
+  const gapY = 4;
 
   const qrDataUrls = await Promise.all(
     students.map((stu) =>
@@ -332,46 +332,96 @@ export async function generateParticipantCardsPDF(
 
     const themeRgb = getThemePdfRgb(settings.themeColor);
     doc.setFillColor(themeRgb[0], themeRgb[1], themeRgb[2]);
-    doc.rect(x, y, cardWidth, 10, 'F');
+    doc.rect(x, y, cardWidth, 9.5, 'F');
     if (settings.schoolLogo) {
       try {
-        doc.addImage(settings.schoolLogo, getPdfImageFormat(settings.schoolLogo), x + 2, y + 1.5, 7, 7);
+        doc.addImage(settings.schoolLogo, getPdfImageFormat(settings.schoolLogo), x + 2, y + 1.5, 6.5, 6.5);
       } catch {
         // ignore invalid image
       }
     }
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.5);
+    doc.setFontSize(8.2);
     doc.setTextColor(255, 255, 255);
-    doc.text('KARTU PESERTA & QR ABSENSI CANDYCBT', x + cardWidth / 2, y + 4.5, { align: 'center' });
+    doc.text('KARTU PESERTA & QR ABSENSI CANDYCBT', x + cardWidth / 2, y + 4.3, { align: 'center' });
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7);
-    doc.text(settings.schoolName, x + cardWidth / 2, y + 8.3, { align: 'center' });
+    doc.setFontSize(6.8);
+    doc.text(settings.schoolName, x + cardWidth / 2, y + 8, { align: 'center' });
 
     doc.setTextColor(15, 23, 42);
-    doc.setFontSize(7.8);
+    doc.setFontSize(7.5);
     const rows: [string, string][] = [
-      ['Nama', stu.name.slice(0, 20)],
+      ['Nama', stu.name.slice(0, 21)],
       ['NIS', stu.nis],
       ['Pass', stu.password],
       ['Kelas', stu.className],
       ['Ruang', `${stu.room} · ${stu.sessionGroup}`],
     ];
     rows.forEach(([label, val], rIdx) => {
-      const ry = y + 16 + rIdx * 5.6;
+      const ry = y + 14.3 + rIdx * 4.8;
       doc.setFont('helvetica', 'normal');
       doc.text(label, x + 3.5, ry);
       doc.setFont('helvetica', 'bold');
-      doc.text(`: ${val}`, x + 17, ry);
+      doc.text(`: ${val}`, x + 16.5, ry);
     });
 
     const qrImg = qrDataUrls[idx];
     if (qrImg) {
-      doc.addImage(qrImg, 'PNG', x + cardWidth - 26, y + 13, 22, 22);
+      doc.addImage(qrImg, 'PNG', x + cardWidth - 25, y + 11.3, 21, 21);
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(6);
+      doc.setFontSize(5.5);
       doc.setTextColor(71, 85, 105);
-      doc.text('SCAN QR ABSEN', x + cardWidth - 15, y + 38.5, { align: 'center' });
+      doc.text('SCAN QR ABSEN', x + cardWidth - 14.5, y + 34.8, { align: 'center' });
+    }
+
+    // Pemisah & blok pengesahan Kepala Sekolah di bagian bawah kartu
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.25);
+    doc.line(x + 3, y + 36.6, x + cardWidth - 3, y + 36.6);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(5.6);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`${settings.academicYear} · ${settings.semester}`, x + 3.5, y + 40.3);
+    doc.text('Kartu wajib dibawa saat ujian', x + 3.5, y + 43.8);
+
+    const sigCenterX = x + cardWidth - 20.5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(5.6);
+    doc.setTextColor(51, 65, 85);
+    doc.text('Kepala Sekolah,', sigCenterX, y + 39.6, { align: 'center' });
+
+    if (settings.principalSignature) {
+      try {
+        doc.addImage(
+          settings.principalSignature,
+          getPdfImageFormat(settings.principalSignature),
+          sigCenterX - 9,
+          y + 40.1,
+          18,
+          6.2
+        );
+      } catch {
+        // ignore invalid signature image
+      }
+    }
+
+    const principalName = (settings.principalName || '-').trim();
+    doc.setFont('helvetica', 'bold');
+    let nameFontSize = 6.0;
+    doc.setFontSize(nameFontSize);
+    while (nameFontSize > 4.6 && doc.getTextWidth(principalName) > 36) {
+      nameFontSize -= 0.3;
+      doc.setFontSize(nameFontSize);
+    }
+    doc.setTextColor(15, 23, 42);
+    doc.text(principalName, sigCenterX, y + 48.1, { align: 'center' });
+
+    if (settings.principalNip?.trim()) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(5.1);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`NIP. ${settings.principalNip.trim()}`, sigCenterX, y + 50.6, { align: 'center' });
     }
   });
 

@@ -1,8 +1,8 @@
-import './server/load-env.js';
+import './server/load-env.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { app } from './server/app.js';
+import { app } from './server/app.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 

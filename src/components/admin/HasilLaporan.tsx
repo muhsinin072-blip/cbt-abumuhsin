@@ -1,15 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { FileSpreadsheet, FileText, Pencil, ShieldAlert } from 'lucide-react';
+import { Download, FileSpreadsheet, FileText, Pencil, ShieldAlert, Trash2 } from 'lucide-react';
 import { apiFetch, createCbtWebSocket } from '../../lib/api';
-import type { AdminResultsResponse, EnrichedResultSession } from '../../lib/api';
+import type { AdminResultsResponse, EnrichedResultSession, PurgeDatabaseResponse } from '../../lib/api';
+import { exportResultsCSV } from '../../lib/csv';
 import { exportResultsExcel } from '../../lib/excel';
 import {
   generateBeritaAcaraPDF,
   generateResultsPDF,
   generateViolationsPDF,
 } from '../../lib/pdf';
+import type { UserRole } from '../../types/cbt';
 
-export const HasilLaporan: React.FC = () => {
+interface HasilLaporanProps {
+  userRole?: UserRole;
+}
+
+export const HasilLaporan: React.FC<HasilLaporanProps> = ({ userRole = 'admin' }) => {
+  const isGuru = userRole === 'guru';
   const [data, setData] = useState<AdminResultsResponse | null>(null);
   const [selectedExamId, setSelectedExamId] = useState<string>('ALL');
   const [loading, setLoading] = useState(true);
@@ -21,6 +28,12 @@ export const HasilLaporan: React.FC = () => {
   const [essayScores, setEssayScores] = useState<Record<string, number>>({});
   const [savingEssay, setSavingEssay] = useState(false);
   const [essayModalError, setEssayModalError] = useState('');
+
+  // Purge answers modal (Admin only)
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeConfirmText, setPurgeConfirmText] = useState('');
+  const [purging, setPurging] = useState(false);
+  const [purgeError, setPurgeError] = useState('');
 
   const loadResults = useCallback(async () => {
     setLoading(true);
@@ -103,6 +116,33 @@ export const HasilLaporan: React.FC = () => {
     }
   };
 
+  const handlePurgeAnswers = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPurgeError('');
+    if (purgeConfirmText.trim().toUpperCase() !== 'HAPUS') {
+      setPurgeError('Ketik HAPUS dengan benar untuk melanjutkan penghapusan.');
+      return;
+    }
+    setPurging(true);
+    try {
+      const res = await apiFetch<PurgeDatabaseResponse>('/api/admin/server/purge', {
+        method: 'POST',
+        body: JSON.stringify({
+          targets: ['answers'],
+          confirmText: purgeConfirmText.trim().toUpperCase(),
+        }),
+      });
+      setPurgeOpen(false);
+      setPurgeConfirmText('');
+      setNotice(res.message || 'Seluruh jawaban soal, nilai, dan log ujian berhasil dihapus.');
+      void loadResults();
+    } catch (err) {
+      setPurgeError(err instanceof Error ? err.message : 'Gagal menghapus database jawaban & nilai.');
+    } finally {
+      setPurging(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -160,6 +200,37 @@ export const HasilLaporan: React.FC = () => {
               <FileSpreadsheet className="w-4 h-4" />
               Export Excel
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                const slug = selectedExam
+                  ? selectedExam.subject.replace(/\s+/g, '_')
+                  : 'Semua_Mapel';
+                const count = exportResultsCSV(
+                  filteredResults,
+                  `Rekap_Nilai_${slug}_${new Date().toISOString().slice(0, 10)}.csv`
+                );
+                setNotice(`Berhasil mengekspor ${count} baris nilai ujian ke CSV.`);
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-teal-700 bg-teal-50 hover:bg-teal-100 text-teal-800 text-sm font-semibold whitespace-nowrap"
+            >
+              <Download className="w-4 h-4" />
+              Export CSV
+            </button>
+            {!isGuru && (data.results.length > 0 || data.violations.length > 0) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setPurgeConfirmText('');
+                  setPurgeError('');
+                  setPurgeOpen(true);
+                }}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-red-300 bg-red-50 hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-sm font-semibold whitespace-nowrap transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                Hapus Semua Jawaban &amp; Nilai
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -342,6 +413,57 @@ export const HasilLaporan: React.FC = () => {
                   className="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold"
                 >
                   {savingEssay ? 'Menghitung...' : 'Simpan & Hitung Nilai Akhir'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Purge All Answers Modal */}
+      {purgeOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-xl border border-red-200 overflow-hidden">
+            <div className="px-6 py-4 bg-red-600 text-white">
+              <h3 className="text-base font-bold">Hapus Semua Jawaban Soal, Nilai &amp; Log</h3>
+            </div>
+            <form onSubmit={handlePurgeAnswers} className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Seluruh data jawaban peserta, nilai PG &amp; Esai, sesi ujian aktif, serta log pelanggaran kecurangan akan dikosongkan permanen. Data siswa, mapel, dan jadwal ujian tetap dipertahankan.
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Ketik <span className="font-mono font-bold text-red-700">HAPUS</span> untuk konfirmasi:
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={purgeConfirmText}
+                  onChange={(e) => setPurgeConfirmText(e.target.value)}
+                  placeholder="Ketik HAPUS"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm uppercase tracking-wider"
+                />
+              </div>
+              {purgeError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-medium">
+                  {purgeError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPurgeOpen(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={purging || purgeConfirmText.trim().toUpperCase() !== 'HAPUS'}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white text-sm font-semibold"
+                >
+                  {purging ? 'Menghapus...' : 'Ya, Hapus Permanen'}
                 </button>
               </div>
             </form>

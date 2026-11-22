@@ -3,7 +3,9 @@ import {
   Activity,
   BookOpen,
   CalendarClock,
+  Download,
   FileBarChart2,
+  FileSpreadsheet,
   GraduationCap,
   LayoutDashboard,
   LogOut,
@@ -16,7 +18,16 @@ import {
   X,
 } from 'lucide-react';
 import { apiFetch, createCbtWebSocket } from '../../lib/api';
-import type { AdminDashboardResponse } from '../../lib/api';
+import type {
+  AdminAttendanceResponse,
+  AdminDashboardResponse,
+  AdminResultsResponse,
+} from '../../lib/api';
+import {
+  exportAttendanceCSV,
+  exportCombinedBackupCSV,
+  exportResultsCSV,
+} from '../../lib/csv';
 import { applyCbtTheme } from '../../lib/theme';
 import type { AuthUser, SchoolSettings } from '../../types/cbt';
 import { LiveClockDate } from '../LiveClockDate';
@@ -59,6 +70,9 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   const [settings, setSettings] = useState<SchoolSettings>(initialSettings);
   const [dashboard, setDashboard] = useState<AdminDashboardResponse | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [csvExporting, setCsvExporting] = useState<'attendance' | 'results' | 'combined' | null>(null);
+  const [csvNotice, setCsvNotice] = useState('');
+  const [csvError, setCsvError] = useState('');
 
   const handleSettingsUpdate = useCallback(
     (next: SchoolSettings) => {
@@ -110,6 +124,40 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     });
     return () => ws.close();
   }, [activeTab, loadDashboard, handleSettingsUpdate]);
+
+  const handleDashboardCsvExport = async (mode: 'attendance' | 'results' | 'combined') => {
+    setCsvExporting(mode);
+    setCsvNotice('');
+    setCsvError('');
+    const todaySlug = new Date().toISOString().slice(0, 10);
+    try {
+      if (mode === 'attendance') {
+        const res = await apiFetch<AdminAttendanceResponse>('/api/admin/attendance?period=all');
+        const count = exportAttendanceCSV(res.records, `Backup_Absensi_Siswa_${todaySlug}.csv`);
+        setCsvNotice(`Berhasil mengekspor ${count} catatan absensi siswa ke file CSV.`);
+      } else if (mode === 'results') {
+        const res = await apiFetch<AdminResultsResponse>('/api/admin/results');
+        const count = exportResultsCSV(res.results, `Backup_Nilai_Ujian_${todaySlug}.csv`);
+        setCsvNotice(`Berhasil mengekspor ${count} data nilai ujian ke file CSV.`);
+      } else {
+        const [attRes, resData] = await Promise.all([
+          apiFetch<AdminAttendanceResponse>('/api/admin/attendance?period=all'),
+          apiFetch<AdminResultsResponse>('/api/admin/results'),
+        ]);
+        const count = exportCombinedBackupCSV(
+          attRes.students,
+          attRes.records,
+          resData.results,
+          `Arsip_Gabungan_Absensi_Nilai_${todaySlug}.csv`
+        );
+        setCsvNotice(`Berhasil mengekspor arsip terpadu ${count} peserta (absensi & nilai) ke CSV.`);
+      }
+    } catch (err) {
+      setCsvError(err instanceof Error ? err.message : 'Gagal mengekspor arsip CSV.');
+    } finally {
+      setCsvExporting(null);
+    }
+  };
 
   const navItems: { id: AdminTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'overview', label: 'Beranda Proktor', icon: LayoutDashboard },
@@ -471,6 +519,89 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {/* Structured CSV Backup & Record-Keeping Panel */}
+                  <section className="cbt-soft-panel rounded-xl p-6 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-lg bg-teal-100 text-teal-800 flex items-center justify-center shrink-0">
+                          <FileSpreadsheet className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold text-slate-900">
+                            Ekspor &amp; Arsip CSV Terstruktur (Backup Lokal)
+                          </h2>
+                          <p className="text-xs text-slate-500">
+                            Unduh arsip absensi kehadiran QR, nilai ujian lengkap, atau rekap gabungan per siswa dalam format CSV siap pakai untuk Excel &amp; pembukuan sekolah.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {csvError && (
+                      <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-medium">
+                        {csvError}
+                      </div>
+                    )}
+                    {csvNotice && (
+                      <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium">
+                        {csvNotice}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <button
+                        type="button"
+                        disabled={csvExporting !== null}
+                        onClick={() => void handleDashboardCsvExport('attendance')}
+                        className="flex items-center justify-between gap-3 p-4 rounded-xl border border-slate-200 bg-white hover:border-teal-400 hover:bg-teal-50/40 disabled:opacity-60 text-left transition-colors"
+                      >
+                        <div>
+                          <p className="text-sm font-bold text-slate-900">
+                            {csvExporting === 'attendance' ? 'Menyiapkan CSV...' : 'Backup Absensi Siswa'}
+                          </p>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Seluruh riwayat scan QR &amp; status kehadiran (.csv)
+                          </p>
+                        </div>
+                        <Download className="w-4 h-4 text-teal-700 shrink-0" />
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={csvExporting !== null}
+                        onClick={() => void handleDashboardCsvExport('results')}
+                        className="flex items-center justify-between gap-3 p-4 rounded-xl border border-slate-200 bg-white hover:border-teal-400 hover:bg-teal-50/40 disabled:opacity-60 text-left transition-colors"
+                      >
+                        <div>
+                          <p className="text-sm font-bold text-slate-900">
+                            {csvExporting === 'results' ? 'Menyiapkan CSV...' : 'Backup Nilai &amp; Hasil Ujian'}
+                          </p>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Skor PG, Esai, nilai akhir, KKM &amp; status sesi (.csv)
+                          </p>
+                        </div>
+                        <Download className="w-4 h-4 text-teal-700 shrink-0" />
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={csvExporting !== null}
+                        onClick={() => void handleDashboardCsvExport('combined')}
+                        className="flex items-center justify-between gap-3 p-4 rounded-xl border border-teal-200 bg-teal-50/60 hover:bg-teal-100/70 disabled:opacity-60 text-left transition-colors"
+                      >
+                        <div>
+                          <p className="text-sm font-bold text-teal-950">
+                            {csvExporting === 'combined' ? 'Menyiapkan CSV...' : 'Arsip Gabungan Per Siswa'}
+                          </p>
+                          <p className="text-xs text-teal-800/80 mt-0.5">
+                            Rekap kehadiran + rata-rata nilai semua mapel (.csv)
+                          </p>
+                        </div>
+                        <Download className="w-4 h-4 text-teal-800 shrink-0" />
+                      </button>
+                    </div>
+                  </section>
                 </>
               )}
             </div>
@@ -479,10 +610,10 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           {activeTab === 'banks' && <BankSoalManager userRole={user.role} />}
           {activeTab === 'teachers' && <TeachersManager />}
           {activeTab === 'students' && <PesertaManager settings={settings} />}
-          {activeTab === 'attendance' && <AbsensiQRManager />}
+          {activeTab === 'attendance' && <AbsensiQRManager userRole={user.role} />}
           {activeTab === 'exams' && <JadwalUjianManager />}
           {activeTab === 'monitoring' && <LiveMonitoring />}
-          {activeTab === 'results' && <HasilLaporan />}
+          {activeTab === 'results' && <HasilLaporan userRole={user.role} />}
           {activeTab === 'settings' && (
             <SchoolSettingsManager
               initialSettings={settings}

@@ -566,8 +566,8 @@ export const TeacherLayout: React.FC<TeacherLayoutProps> = ({
           )}
           {activeTab === 'exams' && <JadwalUjianManager />}
           {activeTab === 'monitoring' && <LiveMonitoring />}
-          {activeTab === 'results' && <HasilLaporan />}
-          {activeTab === 'attendance' && <AbsensiQRManager />}
+          {activeTab === 'results' && <HasilLaporan userRole="guru" />}
+          {activeTab === 'attendance' && <AbsensiQRManager userRole="guru" />}
           {activeTab === 'profile' && (
             <div className="max-w-2xl space-y-6">
               <div>

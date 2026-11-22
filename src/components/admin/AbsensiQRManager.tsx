@@ -23,7 +23,8 @@ import {
   UserCheck,
 } from 'lucide-react';
 import { apiFetch, createCbtWebSocket } from '../../lib/api';
-import type { AdminAttendanceResponse } from '../../lib/api';
+import type { AdminAttendanceResponse, PurgeDatabaseResponse } from '../../lib/api';
+import { exportAttendanceCSV } from '../../lib/csv';
 import { exportAttendanceExcel } from '../../lib/excel';
 import { generateAttendancePDF, generateParticipantCardsPDF } from '../../lib/pdf';
 import type {
@@ -35,6 +36,7 @@ import type {
   SchoolSettings,
   SortDirection,
   Student,
+  UserRole,
 } from '../../types/cbt';
 
 function getTodayIso(): string {
@@ -135,7 +137,12 @@ function playBeep(success: boolean): void {
   }
 }
 
-export const AbsensiQRManager: React.FC = () => {
+interface AbsensiQRManagerProps {
+  userRole?: UserRole;
+}
+
+export const AbsensiQRManager: React.FC<AbsensiQRManagerProps> = ({ userRole = 'admin' }) => {
+  const isGuru = userRole === 'guru';
   const [period, setPeriod] = useState<AttendancePeriod>('daily');
   const [date, setDate] = useState<string>(() => getTodayIso());
   const [month, setMonth] = useState<string>(() => getTodayIso().slice(0, 7));
@@ -154,10 +161,17 @@ export const AbsensiQRManager: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [scanFeedback, setScanFeedback] = useState<{
     type: 'success' | 'duplicate' | 'error';
     text: string;
   } | null>(null);
+
+  // Purge attendance modal (Admin only)
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeConfirmText, setPurgeConfirmText] = useState('');
+  const [purging, setPurging] = useState(false);
+  const [purgeError, setPurgeError] = useState('');
 
   // Filter, Sub-view & Sort controls
   const [periodViewTab, setPeriodViewTab] = useState<'summary' | 'logs'>('summary');
@@ -299,7 +313,8 @@ export const AbsensiQRManager: React.FC = () => {
       } else if (
         event === 'sync:students' ||
         event === 'sync:exams' ||
-        event === 'sync:settings'
+        event === 'sync:settings' ||
+        event === 'sync:attendance'
       ) {
         void loadAttendance();
       }
@@ -602,6 +617,33 @@ export const AbsensiQRManager: React.FC = () => {
       setRecords((prev) => prev.filter((r) => r.id !== recordId));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menghapus catatan absensi.');
+    }
+  };
+
+  const handlePurgeAttendance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPurgeError('');
+    if (purgeConfirmText.trim().toUpperCase() !== 'HAPUS') {
+      setPurgeError('Ketik HAPUS dengan benar untuk mengonfirmasi penghapusan.');
+      return;
+    }
+    setPurging(true);
+    try {
+      const res = await apiFetch<PurgeDatabaseResponse>('/api/admin/server/purge', {
+        method: 'POST',
+        body: JSON.stringify({
+          targets: ['attendance'],
+          confirmText: purgeConfirmText.trim().toUpperCase(),
+        }),
+      });
+      setRecords([]);
+      setPurgeOpen(false);
+      setPurgeConfirmText('');
+      setNotice(res.message || 'Seluruh riwayat absensi QR berhasil dihapus.');
+    } catch (err) {
+      setPurgeError(err instanceof Error ? err.message : 'Gagal menghapus riwayat absensi.');
+    } finally {
+      setPurging(false);
     }
   };
 
@@ -914,6 +956,31 @@ export const AbsensiQRManager: React.FC = () => {
             <FileSpreadsheet className="w-4 h-4" />
             Export Excel
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              const count = exportAttendanceCSV(records, `Absensi_Siswa_QR_${periodFileSlug}.csv`);
+              setNotice(`Berhasil mengekspor ${count} catatan absensi ke CSV (${periodFileSlug}).`);
+            }}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-teal-700 bg-teal-50 hover:bg-teal-100 text-teal-800 text-sm font-semibold whitespace-nowrap"
+          >
+            <Download className="w-4 h-4" />
+            Export CSV
+          </button>
+          {!isGuru && (
+            <button
+              type="button"
+              onClick={() => {
+                setPurgeConfirmText('');
+                setPurgeError('');
+                setPurgeOpen(true);
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-red-300 bg-red-50 hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-sm font-semibold whitespace-nowrap transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Hapus Semua Absensi
+            </button>
+          )}
         </div>
       </div>
 
@@ -1097,6 +1164,11 @@ export const AbsensiQRManager: React.FC = () => {
       {error && (
         <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm font-medium">
+          {notice}
         </div>
       )}
 
@@ -1873,6 +1945,57 @@ export const AbsensiQRManager: React.FC = () => {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Purge All Attendance Modal */}
+      {purgeOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-xl border border-red-200 overflow-hidden">
+            <div className="px-6 py-4 bg-red-600 text-white">
+              <h3 className="text-base font-bold">Hapus Semua Riwayat Absensi QR</h3>
+            </div>
+            <form onSubmit={handlePurgeAttendance} className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Seluruh riwayat absensi QR peserta (harian, pekanan, dan bulanan) akan dihapus permanen dari database. Data siswa dan hasil ujian tetap aman.
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Ketik <span className="font-mono font-bold text-red-700">HAPUS</span> untuk konfirmasi:
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={purgeConfirmText}
+                  onChange={(e) => setPurgeConfirmText(e.target.value)}
+                  placeholder="Ketik HAPUS"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm uppercase tracking-wider"
+                />
+              </div>
+              {purgeError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-medium">
+                  {purgeError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPurgeOpen(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={purging || purgeConfirmText.trim().toUpperCase() !== 'HAPUS'}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white text-sm font-semibold"
+                >
+                  {purging ? 'Menghapus...' : 'Ya, Hapus Permanen'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

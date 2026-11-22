@@ -257,3 +257,23 @@ export interface AttendanceRecord {
   notes?: string;
 }
 
+export type PurgeTarget =
+  | 'students'
+  | 'teachers'
+  | 'banks'
+  | 'questions'
+  | 'exams'
+  | 'answers'
+  | 'attendance';
+
+export interface DatabaseCounts {
+  students: number;
+  teachers: number;
+  banks: number;
+  questions: number;
+  exams: number;
+  sessions: number;
+  violations: number;
+  broadcasts: number;
+  attendance: number;
+}

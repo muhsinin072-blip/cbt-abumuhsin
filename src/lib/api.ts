@@ -293,3 +293,15 @@ export interface AdminAttendanceResponse {
   settings: SchoolSettings;
 }
 
+export interface ServerStatusResponse {
+  metrics: ServerMetrics;
+  settings: SchoolSettings;
+  counts?: import('../types/cbt').DatabaseCounts;
+}
+
+export interface PurgeDatabaseResponse {
+  ok: boolean;
+  message: string;
+  counts: import('../types/cbt').DatabaseCounts;
+  metrics: ServerMetrics;
+}

@@ -27,6 +27,11 @@ export const PesertaManager: React.FC<PesertaManagerProps> = ({ settings }) => {
   const [password, setPassword] = useState('123');
   const [modalError, setModalError] = useState('');
 
+  const [purgeModalOpen, setPurgeModalOpen] = useState(false);
+  const [purgeConfirmText, setPurgeConfirmText] = useState('');
+  const [purging, setPurging] = useState(false);
+  const [purgeError, setPurgeError] = useState('');
+
   const loadStudents = useCallback(async () => {
     setLoading(true);
     try {
@@ -96,6 +101,30 @@ export const PesertaManager: React.FC<PesertaManagerProps> = ({ settings }) => {
     }
   };
 
+  const handlePurgeAllStudents = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (purgeConfirmText.trim().toUpperCase() !== 'HAPUS') {
+      setPurgeError('Ketik kata HAPUS untuk mengonfirmasi.');
+      return;
+    }
+    setPurging(true);
+    setPurgeError('');
+    try {
+      await apiFetch('/api/admin/server/purge', {
+        method: 'POST',
+        body: JSON.stringify({ targets: ['students'], confirmText: 'HAPUS' }),
+      });
+      setStudents([]);
+      setPurgeModalOpen(false);
+      setPurgeConfirmText('');
+      setNotice('Seluruh database peserta didik berhasil dikosongkan.');
+    } catch (err) {
+      setPurgeError(err instanceof Error ? err.message : 'Gagal menghapus semua peserta.');
+    } finally {
+      setPurging(false);
+    }
+  };
+
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -161,6 +190,20 @@ export const PesertaManager: React.FC<PesertaManagerProps> = ({ settings }) => {
             <Printer className="w-4 h-4" />
             Cetak Kartu PDF
           </button>
+          {students.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setPurgeConfirmText('');
+                setPurgeError('');
+                setPurgeModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-red-300 bg-red-50 hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-sm font-semibold whitespace-nowrap transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Hapus Semua Peserta
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -353,6 +396,58 @@ export const PesertaManager: React.FC<PesertaManagerProps> = ({ settings }) => {
                   className="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold"
                 >
                   Simpan Peserta
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {purgeModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-xl border border-red-200 overflow-hidden">
+            <div className="px-6 py-4 bg-red-600 text-white">
+              <h3 className="text-base font-bold">Hapus Semua Database Peserta Didik</h3>
+            </div>
+            <form onSubmit={handlePurgeAllStudents} className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Tindakan ini akan menghapus seluruh{' '}
+                <strong className="font-mono text-slate-900">{students.length} akun peserta didik</strong>{' '}
+                beserta sesi ujian aktif yang terkait secara permanen.
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Ketik <span className="font-mono font-bold text-red-700">HAPUS</span> untuk melanjutkan:
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={purgeConfirmText}
+                  onChange={(e) => setPurgeConfirmText(e.target.value)}
+                  placeholder="Ketik HAPUS"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm uppercase tracking-wider"
+                />
+              </div>
+              {purgeError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-medium">
+                  {purgeError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPurgeModalOpen(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={purging || purgeConfirmText.trim().toUpperCase() !== 'HAPUS'}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white text-sm font-semibold"
+                >
+                  {purging ? 'Menghapus...' : 'Ya, Hapus Semua'}
                 </button>
               </div>
             </form>

@@ -62,6 +62,12 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
   const [importing, setImporting] = useState(false);
   const [importModalError, setImportModalError] = useState('');
 
+  // Bulk Clear / Purge Modal
+  const [clearMode, setClearMode] = useState<'bank_questions' | 'all_banks' | null>(null);
+  const [clearConfirmText, setClearConfirmText] = useState('');
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState('');
+
   const loadBanks = useCallback(async () => {
     setLoading(true);
     try {
@@ -261,6 +267,48 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
     }
   };
 
+  const handleConfirmClear = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!clearMode) return;
+    setClearError('');
+    if (clearConfirmText.trim().toUpperCase() !== 'HAPUS') {
+      setClearError('Ketik HAPUS dengan benar untuk mengonfirmasi penghapusan.');
+      return;
+    }
+    setClearing(true);
+    try {
+      if (clearMode === 'all_banks') {
+        const res = await apiFetch<{ message: string }>('/api/admin/server/purge', {
+          method: 'POST',
+          body: JSON.stringify({
+            targets: ['banks'],
+            confirmText: clearConfirmText.trim().toUpperCase(),
+          }),
+        });
+        setBanks([]);
+        setSelectedBankId('');
+        setClearMode(null);
+        setClearConfirmText('');
+        setNotice(res.message || 'Semua mapel, bank soal, dan jadwal terkait berhasil dihapus.');
+      } else if (clearMode === 'bank_questions' && selectedBank) {
+        const res = await apiFetch<{ bank: QuestionBank; message?: string }>(
+          `/api/admin/banks/${selectedBank.id}/questions`,
+          { method: 'DELETE' }
+        );
+        setBanks((prev) => prev.map((b) => (b.id === res.bank.id ? res.bank : b)));
+        setClearMode(null);
+        setClearConfirmText('');
+        setNotice(
+          res.message || `Semua butir soal pada bank ${selectedBank.code} berhasil dikosongkan.`
+        );
+      }
+    } catch (err) {
+      setClearError(err instanceof Error ? err.message : 'Gagal menghapus data soal.');
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -272,6 +320,20 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          {!isGuru && banks.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setClearConfirmText('');
+                setClearError('');
+                setClearMode('all_banks');
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-red-300 bg-red-50 hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-sm font-semibold whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Hapus Semua Mapel & Soal
+            </button>
+          )}
           <button
             type="button"
             onClick={downloadQuestionTemplate}
@@ -395,6 +457,20 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
                     <Plus className="w-4 h-4" />
                     Tambah Soal
                   </button>
+                  {selectedBank.questions.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setClearConfirmText('');
+                        setClearError('');
+                        setClearMode('bank_questions');
+                      }}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-red-200 bg-red-50 hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-sm font-semibold whitespace-nowrap transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Kosongkan Soal
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -848,6 +924,63 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Clear / Purge Confirmation Modal */}
+      {clearMode && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-xl border border-red-200 overflow-hidden">
+            <div className="px-6 py-4 bg-red-600 text-white">
+              <h3 className="text-base font-bold">
+                {clearMode === 'all_banks'
+                  ? 'Hapus Semua Database Mapel & Soal'
+                  : `Kosongkan Soal Bank ${selectedBank?.code || ''}`}
+              </h3>
+            </div>
+            <form onSubmit={handleConfirmClear} className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {clearMode === 'all_banks'
+                  ? `Seluruh ${banks.length} paket Mapel/Bank Soal beserta butir soal, jadwal ujian, dan hasil sesi terkait akan dihapus permanen.`
+                  : `Seluruh ${selectedBank?.questions.length || 0} butir soal pada bank "${selectedBank?.subject}" akan dikosongkan permanen.`}
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Ketik <span className="font-mono font-bold text-red-700">HAPUS</span> untuk melanjutkan:
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={clearConfirmText}
+                  onChange={(e) => setClearConfirmText(e.target.value)}
+                  placeholder="Ketik HAPUS"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm uppercase tracking-wider"
+                />
+              </div>
+              {clearError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-medium">
+                  {clearError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setClearMode(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={clearing || clearConfirmText.trim().toUpperCase() !== 'HAPUS'}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white text-sm font-semibold"
+                >
+                  {clearing ? 'Menghapus...' : 'Ya, Hapus Permanen'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

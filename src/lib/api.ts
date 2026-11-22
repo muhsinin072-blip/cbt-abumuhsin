@@ -5,6 +5,7 @@ import type {
   BroadcastNotice,
   ExamSchedule,
   ExamSession,
+  LearningMaterial,
   QuestionBank,
   SanitizedQuestion,
   SchoolSettings,
@@ -280,6 +281,8 @@ export type TeachersResponse = { teachers: TeacherListItem[] };
 export type StudentsResponse = { students: Student[] };
 export type BanksResponse = { banks: QuestionBank[] };
 export type ExamsResponse = { exams: ExamSchedule[] };
+export type MaterialsResponse = { materials: LearningMaterial[]; classes: string[] };
+export type StudentMaterialsResponse = { materials: LearningMaterial[] };
 
 export interface AdminAttendanceResponse {
   period: AttendancePeriod;

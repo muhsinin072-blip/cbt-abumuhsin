@@ -82,6 +82,13 @@ const PURGE_OPTIONS: {
     getCountLabel: (c) => `${c.attendance} Catatan`,
     hasData: (c) => c.attendance > 0,
   },
+  {
+    id: 'materials',
+    title: 'Materi Pembelajaran & Modul',
+    description: 'Menghapus seluruh materi, video, tautan referensi, dan tugas belajar siswa.',
+    getCountLabel: (c) => `${c.materials ?? 0} Materi`,
+    hasData: (c) => (c.materials ?? 0) > 0,
+  },
 ];
 
 export const ServerManager: React.FC<ServerManagerProps> = ({ onSettingsUpdated }) => {
@@ -396,7 +403,7 @@ export const ServerManager: React.FC<ServerManagerProps> = ({ onSettingsUpdated 
 
           <div className="bg-white border border-slate-200 rounded-xl p-5">
             <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>Basis Data SQL (SQLite)</span>
+              <span>Basis Data CBT (SQL)</span>
               <HardDrive className="w-4 h-4 text-slate-600" />
             </div>
             <p className="mt-2 text-xl font-bold font-mono tabular-nums text-slate-900">
@@ -627,6 +634,7 @@ export const ServerManager: React.FC<ServerManagerProps> = ({ onSettingsUpdated 
                   'answers',
                   'teachers',
                   'attendance',
+                  'materials',
                 ])
               }
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-red-300 bg-white hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-xs font-semibold whitespace-nowrap transition-colors"

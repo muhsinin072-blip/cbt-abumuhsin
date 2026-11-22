@@ -1,21 +1,31 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import {
+  BookOpen,
+  Calendar,
   CheckCircle2,
   Clock,
   Download,
+  ExternalLink,
   KeyRound,
   Lock,
   LogOut,
+  NotebookPen,
+  Paperclip,
   Play,
   QrCode,
   RefreshCw,
   ShieldAlert,
   Volume2,
+  X,
 } from 'lucide-react';
 import { apiFetch, createCbtWebSocket } from '../../lib/api';
-import type { StartExamResponse, StudentExamListItem } from '../../lib/api';
-import type { AuthUser, BroadcastNotice } from '../../types/cbt';
+import type {
+  StartExamResponse,
+  StudentExamListItem,
+  StudentMaterialsResponse,
+} from '../../lib/api';
+import type { AuthUser, BroadcastNotice, LearningMaterial } from '../../types/cbt';
 import { LiveClockDate } from '../LiveClockDate';
 import { ExamRoom } from './ExamRoom';
 
@@ -33,6 +43,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   onLogout,
 }) => {
   const [exams, setExams] = useState<StudentExamListItem[]>([]);
+  const [materials, setMaterials] = useState<LearningMaterial[]>([]);
+  const [activeSection, setActiveSection] = useState<'exams' | 'materials'>('exams');
+  const [selectedMaterial, setSelectedMaterial] = useState<LearningMaterial | null>(null);
   const [broadcasts, setBroadcasts] = useState<BroadcastNotice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -61,12 +74,18 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     setLoading(true);
     setError('');
     try {
-      const data = await apiFetch<{
-        exams: StudentExamListItem[];
-        broadcasts: BroadcastNotice[];
-      }>('/api/student/exams');
-      setExams(data.exams);
-      setBroadcasts(data.broadcasts || []);
+      const [examRes, matRes] = await Promise.all([
+        apiFetch<{
+          exams: StudentExamListItem[];
+          broadcasts: BroadcastNotice[];
+        }>('/api/student/exams'),
+        apiFetch<StudentMaterialsResponse>('/api/student/materials').catch(() => ({
+          materials: [],
+        })),
+      ]);
+      setExams(examRes.exams);
+      setBroadcasts(examRes.broadcasts || []);
+      setMaterials(matRes.materials || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat daftar ujian.');
     } finally {
@@ -77,7 +96,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   useEffect(() => {
     loadExams();
     const ws = createCbtWebSocket((event, payload) => {
-      if (event === 'exams:updated' || event === 'admin:command') {
+      if (event === 'exams:updated' || event === 'materials:updated' || event === 'admin:command') {
         loadExams();
       } else if (event === 'admin:broadcast' && payload) {
         const noticeItem = payload as BroadcastNotice;
@@ -208,12 +227,87 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           </div>
         )}
 
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-200/80 pb-3">
+          <button
+            type="button"
+            onClick={() => setActiveSection('exams')}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              activeSection === 'exams'
+                ? 'bg-teal-700 text-white'
+                : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            <Clock className="w-4 h-4" />
+            Jadwal Ujian ({exams.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('materials')}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              activeSection === 'materials'
+                ? 'bg-teal-700 text-white'
+                : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            <NotebookPen className="w-4 h-4" />
+            Materi Pembelajaran ({materials.length})
+          </button>
+        </div>
+
         {loading ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {[1, 2].map((n) => (
               <div key={n} className="h-44 bg-white border border-slate-200 rounded-xl animate-pulse" />
             ))}
           </div>
+        ) : activeSection === 'materials' ? (
+          materials.length === 0 ? (
+            <div className="cbt-soft-panel rounded-xl p-10 text-center">
+              <p className="text-base font-semibold text-slate-900">Belum Ada Materi Pembelajaran</p>
+              <p className="text-sm text-slate-500 mt-1">
+                Materi, tautan video, atau tugas belajar dari guru untuk kelas {user.className} akan tampil di sini.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {materials.map((mat) => (
+                <div
+                  key={mat.id}
+                  className="cbt-soft-panel rounded-xl p-6 flex flex-col justify-between gap-4"
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
+                      <span className="font-semibold text-teal-800">{mat.subject}</span>
+                      <span className="px-2 py-0.5 rounded border border-slate-200 bg-slate-50 font-semibold text-slate-700">
+                        {mat.materialType}
+                      </span>
+                    </div>
+                    <h2 className="mt-2 text-lg font-bold text-slate-900">{mat.title}</h2>
+                    {mat.summary && (
+                      <p className="text-sm text-slate-600 mt-1 line-clamp-2">{mat.summary}</p>
+                    )}
+                    <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                      <span>Guru: {mat.teacherName}</span>
+                      {mat.dueDate && (
+                        <span className="inline-flex items-center gap-1 text-amber-800 font-semibold">
+                          <Calendar className="w-3.5 h-3.5" />
+                          Tenggat: {mat.dueDate}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMaterial(mat)}
+                    className="w-full py-2.5 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <BookOpen className="w-4 h-4" />
+                    Buka Materi
+                  </button>
+                </div>
+              ))}
+            </div>
+          )
         ) : exams.length === 0 ? (
           <div className="cbt-soft-panel rounded-xl p-10 text-center">
             <p className="text-base font-semibold text-slate-900">Belum Ada Jadwal Ujian Aktif</p>
@@ -442,6 +536,83 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 type="button"
                 onClick={() => setQrModalOpen(false)}
                 className="flex-1 px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Learning Material Reader Modal */}
+      {selectedMaterial && (
+        <div className="fixed inset-0 z-40 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="max-w-2xl w-full bg-white rounded-xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="min-w-0">
+                <p className="text-xs text-teal-300 font-semibold">{selectedMaterial.subject}</p>
+                <h3 className="text-base font-bold truncate">{selectedMaterial.title}</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedMaterial(null)}
+                className="text-slate-400 hover:text-white shrink-0"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 overflow-y-auto text-sm text-slate-700">
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="px-2.5 py-1 rounded bg-slate-100 text-slate-700 font-semibold">
+                  Guru: {selectedMaterial.teacherName}
+                </span>
+                {selectedMaterial.dueDate && (
+                  <span className="px-2.5 py-1 rounded bg-amber-50 border border-amber-200 text-amber-800 font-semibold">
+                    Tenggat Tugas: {selectedMaterial.dueDate}
+                  </span>
+                )}
+              </div>
+
+              {selectedMaterial.summary && (
+                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-700">
+                  {selectedMaterial.summary}
+                </div>
+              )}
+
+              {selectedMaterial.content && (
+                <div className="whitespace-pre-wrap leading-relaxed text-slate-800">
+                  {selectedMaterial.content}
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-2.5 pt-2">
+                {selectedMaterial.resourceUrl && (
+                  <a
+                    href={selectedMaterial.resourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-800 text-xs font-semibold"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    Buka Tautan Materi / Video
+                  </a>
+                )}
+                {selectedMaterial.attachmentDataUrl && selectedMaterial.attachmentName && (
+                  <a
+                    href={selectedMaterial.attachmentDataUrl}
+                    download={selectedMaterial.attachmentName}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-sky-50 border border-sky-200 hover:bg-sky-100 text-sky-800 text-xs font-semibold"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                    Unduh Lampiran: {selectedMaterial.attachmentName}
+                  </a>
+                )}
+              </div>
+            </div>
+            <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setSelectedMaterial(null)}
+                className="px-4 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold"
               >
                 Tutup
               </button>

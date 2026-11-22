@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  NotebookPen,
   Palette,
   QrCode,
   Server,
@@ -36,6 +37,7 @@ import { BankSoalManager } from './BankSoalManager';
 import { HasilLaporan } from './HasilLaporan';
 import { JadwalUjianManager } from './JadwalUjianManager';
 import { LiveMonitoring } from './LiveMonitoring';
+import { PembelajaranManager } from './PembelajaranManager';
 import { PesertaManager } from './PesertaManager';
 import { SchoolSettingsManager } from './SchoolSettingsManager';
 import { ServerManager } from './ServerManager';
@@ -43,6 +45,7 @@ import { TeachersManager } from './TeachersManager';
 
 type AdminTab =
   | 'overview'
+  | 'learning'
   | 'banks'
   | 'teachers'
   | 'students'
@@ -161,7 +164,8 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
 
   const navItems: { id: AdminTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'overview', label: 'Beranda Proktor', icon: LayoutDashboard },
-    { id: 'banks', label: 'Bank Soal & Excel', icon: BookOpen },
+    { id: 'learning', label: 'Pembelajaran', icon: NotebookPen },
+    { id: 'banks', label: 'Bank Soal & Import', icon: BookOpen },
     { id: 'teachers', label: 'Data Guru & Akses', icon: GraduationCap },
     { id: 'students', label: 'Peserta Ujian', icon: Users },
     { id: 'attendance', label: 'Absensi QR Code', icon: QrCode },
@@ -607,6 +611,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             </div>
           )}
 
+          {activeTab === 'learning' && <PembelajaranManager userRole={user.role} />}
           {activeTab === 'banks' && <BankSoalManager userRole={user.role} />}
           {activeTab === 'teachers' && <TeachersManager />}
           {activeTab === 'students' && <PesertaManager settings={settings} />}

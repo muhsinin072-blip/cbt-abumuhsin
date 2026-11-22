@@ -29,6 +29,16 @@ export interface ParsedExcelStudent {
   issues: string[];
 }
 
+export interface ParsedExcelTeacher {
+  rowNumber: number;
+  nip: string;
+  fullName: string;
+  subject: string;
+  password: string;
+  isActive: boolean;
+  issues: string[];
+}
+
 export async function downloadQuestionTemplate(): Promise<void> {
   const data: SheetData = [
     [
@@ -147,6 +157,50 @@ export async function downloadStudentTemplate(): Promise<void> {
       ],
     },
   ]).toFile('Template_Import_Peserta_CandyCBT.xlsx');
+}
+
+export async function downloadTeacherTemplate(): Promise<void> {
+  const data: SheetData = [
+    [
+      { value: 'No', fontWeight: 'bold' },
+      { value: 'NIP / Username', fontWeight: 'bold' },
+      { value: 'Nama Lengkap', fontWeight: 'bold' },
+      { value: 'Mata Pelajaran', fontWeight: 'bold' },
+      { value: 'Password', fontWeight: 'bold' },
+      { value: 'Status', fontWeight: 'bold' },
+    ],
+    [
+      { type: Number, value: 1 },
+      { type: String, value: '198801012015031002' },
+      { type: String, value: 'Drs. Hendra Gunawan, M.Pd.' },
+      { type: String, value: 'Matematika' },
+      { type: String, value: 'guru123' },
+      { type: String, value: 'AKTIF' },
+    ],
+    [
+      { type: Number, value: 2 },
+      { type: String, value: 'guru_indo' },
+      { type: String, value: 'Rina Puspitasari, S.Pd.' },
+      { type: String, value: 'Bahasa Indonesia' },
+      { type: String, value: 'guru123' },
+      { type: String, value: 'AKTIF' },
+    ],
+  ];
+
+  await writeXlsxFile([
+    {
+      sheet: 'Template_Guru',
+      data,
+      columns: [
+        { width: 6 },
+        { width: 22 },
+        { width: 30 },
+        { width: 24 },
+        { width: 14 },
+        { width: 12 },
+      ],
+    },
+  ]).toFile('Template_Import_Guru_CandyCBT.xlsx');
 }
 
 function parseCsvText(text: string): string[][] {
@@ -308,6 +362,49 @@ export async function parseStudentExcel(file: File): Promise<ParsedExcelStudent[
       };
     })
     .filter((item) => item.nis || item.name);
+}
+
+export async function parseTeacherExcel(file: File): Promise<ParsedExcelTeacher[]> {
+  const rows = await readSpreadsheetRows(file);
+
+  return rows
+    .map((row, idx) => {
+      const nip = getField(row, ['NIP / Username', 'NIP', 'Username', 'NUPTK', 'Kode Guru']);
+      const fullName = getField(row, ['Nama Lengkap', 'Nama Guru', 'Nama Lengkap Guru', 'Nama', 'Name']);
+      const subject =
+        getField(row, ['Mata Pelajaran', 'Mapel', 'Subject', 'Bidang Studi']) ||
+        'Guru Mata Pelajaran';
+      const rawPassword = getField(row, ['Password', 'Pass', 'Sandi', 'Kata Sandi']);
+      const password = rawPassword || '';
+      const rawStatus = getField(row, ['Status', 'Status Akses', 'Aktif', 'Active']).toUpperCase();
+      const isActive =
+        rawStatus === 'NONAKTIF' ||
+        rawStatus === 'NON-AKTIF' ||
+        rawStatus === 'TIDAK AKTIF' ||
+        rawStatus === 'FALSE' ||
+        rawStatus === '0' ||
+        rawStatus === 'N'
+          ? false
+          : true;
+
+      const issues: string[] = [];
+      if (!nip) issues.push('NIP / Username wajib diisi');
+      if (!fullName) issues.push('Nama Lengkap wajib diisi');
+      if (password && password.length < 6) {
+        issues.push('Password minimal 6 karakter');
+      }
+
+      return {
+        rowNumber: idx + 2,
+        nip,
+        fullName,
+        subject,
+        password,
+        isActive,
+        issues,
+      };
+    })
+    .filter((item) => item.nip || item.fullName);
 }
 
 export async function exportResultsExcel(

@@ -26,8 +26,12 @@ import type {
   AttendanceRecord,
   AttendanceStatus,
   BroadcastNotice,
+  DatabaseCounts,
   ExamSchedule,
   ExamSession,
+  LearningMaterial,
+  LearningMaterialType,
+  PurgeTarget,
   Question,
   QuestionBank,
   SanitizedQuestion,
@@ -178,6 +182,60 @@ function isBankOwnedByTeacher(bank: QuestionBank, user: TokenPayload): boolean {
 
 function getOwnedBankIds(db: CbtDatabase, user: TokenPayload): Set<string> {
   return new Set(db.banks.filter((b) => isBankOwnedByTeacher(b, user)).map((b) => b.id));
+}
+
+function isMaterialOwnedByTeacher(material: LearningMaterial, user: TokenPayload): boolean {
+  if (material.teacherId && material.teacherId === user.sub) {
+    return true;
+  }
+  return (
+    Boolean(material.teacherName) &&
+    material.teacherName.trim().toLowerCase() === user.name.trim().toLowerCase()
+  );
+}
+
+const ALLOWED_MATERIAL_TYPES = new Set<LearningMaterialType>([
+  'ARTIKEL',
+  'PDF_MODUL',
+  'VIDEO',
+  'TAUTAN',
+  'TUGAS',
+]);
+
+function sanitizeHttpUrl(raw: unknown): { url: string; valid: boolean } {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return { url: '', valid: true };
+  }
+  const trimmed = raw.trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return { url: parsed.toString(), valid: true };
+    }
+  } catch {
+    // invalid URL
+  }
+  return { url: '', valid: false };
+}
+
+const SAFE_ATTACHMENT_DATA_URL_REGEX =
+  /^data:(application\/pdf|application\/msword|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|presentationml\.presentation|spreadsheetml\.sheet)|application\/vnd\.ms-powerpoint|text\/plain|image\/(png|jpeg|jpg|webp));base64,[A-Za-z0-9+/=]+$/i;
+
+function sanitizeMaterialAttachment(raw: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return { ok: true, value: '' };
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length > 3_500_000) {
+    return { ok: false, error: 'Ukuran lampiran terlalu besar (maksimal 2 MB).' };
+  }
+  if (!SAFE_ATTACHMENT_DATA_URL_REGEX.test(trimmed)) {
+    return {
+      ok: false,
+      error: 'Format lampiran harus PDF, Word, PowerPoint, Teks, PNG, JPG, atau WebP.',
+    };
+  }
+  return { ok: true, value: trimmed };
 }
 
 function requireStudent(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
@@ -586,6 +644,12 @@ app.put('/api/teacher/profile', requireAuth, (req: AuthenticatedRequest, res) =>
         bankUpdated = true;
       }
     }
+    for (const mat of db.materials || []) {
+      if (mat.teacherId === teacher.id || mat.teacherName.trim().toLowerCase() === oldName) {
+        mat.teacherId = teacher.id;
+        mat.teacherName = fullName;
+      }
+    }
   }
   if (subject) {
     teacher.subject = subject;
@@ -593,6 +657,7 @@ app.put('/api/teacher/profile', requireAuth, (req: AuthenticatedRequest, res) =>
 
   store.commit();
   sendToAdmins('sync:teachers', { action: 'updated', teacherId: teacher.id });
+  sendToAdmins('sync:materials', { action: 'teacher_renamed', teacherId: teacher.id });
   if (bankUpdated) {
     sendToAdmins('sync:banks', { action: 'teacher_renamed', teacherId: teacher.id });
   }
@@ -658,6 +723,25 @@ app.get('/api/student/exams', requireAuth, requireStudent, (req: AuthenticatedRe
     broadcasts: db.broadcasts.slice(0, 5),
     maintenanceMode: db.settings.maintenanceMode,
   });
+});
+
+app.get('/api/student/materials', requireAuth, requireStudent, (req: AuthenticatedRequest, res) => {
+  const db = store.getDb();
+  const student = db.students.find((s) => s.id === req.user!.sub);
+  if (!student) {
+    res.status(404).json({ error: 'Data peserta tidak ditemukan.' });
+    return;
+  }
+
+  const materials = (db.materials || [])
+    .filter(
+      (m) =>
+        m.isPublished &&
+        (m.targetClasses.length === 0 || m.targetClasses.includes(student.className))
+    )
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+  res.json({ materials });
 });
 
 app.post('/api/student/exams/:examId/start', requireAuth, requireStudent, (req: AuthenticatedRequest, res) => {
@@ -1203,6 +1287,7 @@ app.put('/api/admin/teachers/:id', requireAuth, requireAdmin, (req, res) => {
   }
 
   let bankUpdated = false;
+  let materialUpdated = false;
   if (typeof body.fullName === 'string' && body.fullName.trim()) {
     const nextName = body.fullName.trim();
     if (nextName !== teacher.fullName) {
@@ -1213,6 +1298,13 @@ app.put('/api/admin/teachers/:id', requireAuth, requireAdmin, (req, res) => {
           bank.teacherId = teacher.id;
           bank.teacherName = nextName;
           bankUpdated = true;
+        }
+      }
+      for (const mat of db.materials || []) {
+        if (mat.teacherId === teacher.id || mat.teacherName.trim().toLowerCase() === oldName) {
+          mat.teacherId = teacher.id;
+          mat.teacherName = nextName;
+          materialUpdated = true;
         }
       }
     }
@@ -1235,6 +1327,10 @@ app.put('/api/admin/teachers/:id', requireAuth, requireAdmin, (req, res) => {
   sendToAdmins('sync:teachers', { action: 'updated', teacherId: teacher.id });
   if (bankUpdated) {
     sendToAdmins('sync:banks', { action: 'teacher_renamed', teacherId: teacher.id });
+  }
+  if (materialUpdated) {
+    sendToAdmins('sync:materials', { action: 'teacher_renamed', teacherId: teacher.id });
+    broadcastToAllStudents('materials:updated', { action: 'teacher_renamed' });
   }
 
   res.json({
@@ -1264,6 +1360,299 @@ app.delete('/api/admin/teachers/:id', requireAuth, requireAdmin, (req, res) => {
   }
   store.commit();
   sendToAdmins('sync:teachers', { action: 'deleted', teacherId: removed.id });
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/teachers/import', requireAuth, requireAdmin, (req, res) => {
+  const db = store.getDb();
+  if (!Array.isArray(db.teachers)) {
+    db.teachers = [];
+  }
+  const incoming = Array.isArray(req.body?.teachers) ? req.body.teachers : [];
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+  let bankUpdated = false;
+  let materialUpdated = false;
+
+  for (const raw of incoming) {
+    const nip = typeof raw?.nip === 'string' ? raw.nip.trim() : String(raw?.nip || '').trim();
+    const fullName = typeof raw?.fullName === 'string' ? raw.fullName.trim() : '';
+    const subject =
+      typeof raw?.subject === 'string' && raw.subject.trim()
+        ? raw.subject.trim()
+        : 'Guru Mata Pelajaran';
+    const rawPassword = typeof raw?.password === 'string' ? raw.password.trim() : '';
+    const isActive = typeof raw?.isActive === 'boolean' ? raw.isActive : true;
+
+    if (!nip || !fullName) {
+      skipped += 1;
+      continue;
+    }
+    if (rawPassword && rawPassword.length < 6) {
+      skipped += 1;
+      continue;
+    }
+
+    const existing = db.teachers.find(
+      (t) => t.nip.trim().toLowerCase() === nip.toLowerCase()
+    );
+
+    if (existing) {
+      const oldName = existing.fullName.trim().toLowerCase();
+      if (fullName !== existing.fullName) {
+        existing.fullName = fullName;
+        for (const bank of db.banks) {
+          if (bank.teacherId === existing.id || bank.teacherName.trim().toLowerCase() === oldName) {
+            bank.teacherId = existing.id;
+            bank.teacherName = fullName;
+            bankUpdated = true;
+          }
+        }
+        for (const mat of db.materials || []) {
+          if (mat.teacherId === existing.id || mat.teacherName.trim().toLowerCase() === oldName) {
+            mat.teacherId = existing.id;
+            mat.teacherName = fullName;
+            materialUpdated = true;
+          }
+        }
+      }
+      existing.subject = subject;
+      existing.isActive = isActive;
+      if (rawPassword.length >= 6) {
+        existing.passwordHash = hashPassword(rawPassword);
+      }
+      updated += 1;
+    } else {
+      const passwordToUse = rawPassword.length >= 6 ? rawPassword : 'guru123';
+      db.teachers.push({
+        id: `guru-${crypto.randomUUID()}`,
+        nip,
+        fullName,
+        subject,
+        passwordHash: hashPassword(passwordToUse),
+        isActive,
+        createdAt: new Date().toISOString(),
+      });
+      added += 1;
+    }
+  }
+
+  store.commit();
+  sendToAdmins('sync:teachers', { action: 'imported', added, updated });
+  if (bankUpdated) {
+    sendToAdmins('sync:banks', { action: 'teacher_renamed' });
+  }
+  if (materialUpdated) {
+    sendToAdmins('sync:materials', { action: 'teacher_renamed' });
+    broadcastToAllStudents('materials:updated', { action: 'teacher_renamed' });
+  }
+
+  const list = db.teachers.map((t) => {
+    const ownedBankIds = new Set(
+      db.banks
+        .filter(
+          (b) =>
+            b.teacherId === t.id ||
+            b.teacherName.trim().toLowerCase() === t.fullName.trim().toLowerCase()
+        )
+        .map((b) => b.id)
+    );
+    const examsCount = db.exams.filter((e) => ownedBankIds.has(e.bankId)).length;
+    return {
+      id: t.id,
+      nip: t.nip,
+      fullName: t.fullName,
+      subject: t.subject,
+      isActive: t.isActive,
+      createdAt: t.createdAt,
+      banksCount: ownedBankIds.size,
+      examsCount,
+    };
+  });
+
+  res.json({ added, updated, skipped, teachers: list });
+});
+
+// Pembelajaran & Modul Materi (Admin, Proktor, dan setiap Guru pengampu)
+app.get('/api/admin/materials', requireAuth, requireStaff, (req: AuthenticatedRequest, res) => {
+  const db = store.getDb();
+  const allMaterials = db.materials || [];
+  const materials = (isGuruUser(req.user)
+    ? allMaterials.filter((m) => isMaterialOwnedByTeacher(m, req.user!))
+    : allMaterials
+  )
+    .slice()
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+  const classes = Array.from(new Set(db.students.map((s) => s.className).filter(Boolean))).sort();
+  res.json({ materials, classes });
+});
+
+app.post('/api/admin/materials', requireAuth, requireStaff, (req: AuthenticatedRequest, res) => {
+  const db = store.getDb();
+  if (!Array.isArray(db.materials)) {
+    db.materials = [];
+  }
+  const body = req.body || {};
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+  if (!title || !subject) {
+    res.status(400).json({ error: 'Judul materi dan Mata Pelajaran wajib diisi.' });
+    return;
+  }
+
+  const rawType = typeof body.materialType === 'string' ? body.materialType.trim().toUpperCase() : 'ARTIKEL';
+  const materialType: LearningMaterialType = ALLOWED_MATERIAL_TYPES.has(rawType as LearningMaterialType)
+    ? (rawType as LearningMaterialType)
+    : 'ARTIKEL';
+
+  const { url: resourceUrl, valid: urlValid } = sanitizeHttpUrl(body.resourceUrl);
+  if (!urlValid) {
+    res.status(400).json({ error: 'Tautan materi harus berupa URL http:// atau https:// yang valid.' });
+    return;
+  }
+
+  const attachmentCheck = sanitizeMaterialAttachment(body.attachmentDataUrl);
+  if (!attachmentCheck.ok) {
+    res.status(400).json({ error: attachmentCheck.error });
+    return;
+  }
+  const attachmentDataUrl = attachmentCheck.value;
+  const attachmentName = typeof body.attachmentName === 'string' ? body.attachmentName.trim() : '';
+
+  let teacherId: string | undefined =
+    typeof body.teacherId === 'string' && body.teacherId.trim() ? body.teacherId.trim() : undefined;
+  let teacherName =
+    typeof body.teacherName === 'string' && body.teacherName.trim()
+      ? body.teacherName.trim()
+      : req.user!.name;
+
+  if (isGuruUser(req.user)) {
+    teacherId = req.user!.sub;
+    teacherName = req.user!.name;
+  }
+
+  const targetClasses = Array.isArray(body.targetClasses)
+    ? body.targetClasses.filter((c: unknown): c is string => typeof c === 'string' && c.trim().length > 0)
+    : [];
+
+  const now = new Date().toISOString();
+  const material: LearningMaterial = {
+    id: `mat-${crypto.randomUUID()}`,
+    title,
+    subject,
+    gradeLevel: typeof body.gradeLevel === 'string' && body.gradeLevel.trim() ? body.gradeLevel.trim() : 'Semua',
+    targetClasses,
+    materialType,
+    summary: typeof body.summary === 'string' ? body.summary.trim() : '',
+    content: typeof body.content === 'string' ? body.content.trim() : '',
+    resourceUrl: resourceUrl || undefined,
+    attachmentName: attachmentDataUrl && attachmentName ? attachmentName : undefined,
+    attachmentDataUrl: attachmentDataUrl || undefined,
+    teacherId,
+    teacherName,
+    isPublished: body.isPublished !== undefined ? Boolean(body.isPublished) : true,
+    dueDate:
+      materialType === 'TUGAS' && typeof body.dueDate === 'string' && body.dueDate.trim()
+        ? body.dueDate.trim()
+        : undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  db.materials.unshift(material);
+  store.commit();
+  sendToAdmins('sync:materials', { action: 'created', materialId: material.id });
+  if (material.isPublished) {
+    broadcastToAllStudents('materials:updated', { action: 'created', materialId: material.id });
+  }
+  res.status(201).json({ material });
+});
+
+app.put('/api/admin/materials/:id', requireAuth, requireStaff, (req: AuthenticatedRequest, res) => {
+  const db = store.getDb();
+  const material = (db.materials || []).find((m) => m.id === req.params.id);
+  if (!material) {
+    res.status(404).json({ error: 'Materi pembelajaran tidak ditemukan.' });
+    return;
+  }
+  if (isGuruUser(req.user) && !isMaterialOwnedByTeacher(material, req.user!)) {
+    res.status(403).json({ error: 'Anda hanya dapat mengubah materi pembelajaran milik Anda sendiri.' });
+    return;
+  }
+
+  const body = req.body || {};
+  if (typeof body.title === 'string' && body.title.trim()) material.title = body.title.trim();
+  if (typeof body.subject === 'string' && body.subject.trim()) material.subject = body.subject.trim();
+  if (typeof body.gradeLevel === 'string') material.gradeLevel = body.gradeLevel.trim() || 'Semua';
+  if (Array.isArray(body.targetClasses)) {
+    material.targetClasses = body.targetClasses.filter(
+      (c: unknown): c is string => typeof c === 'string' && c.trim().length > 0
+    );
+  }
+  if (typeof body.materialType === 'string') {
+    const rawType = body.materialType.trim().toUpperCase();
+    if (ALLOWED_MATERIAL_TYPES.has(rawType as LearningMaterialType)) {
+      material.materialType = rawType as LearningMaterialType;
+    }
+  }
+  if (typeof body.summary === 'string') material.summary = body.summary.trim();
+  if (typeof body.content === 'string') material.content = body.content.trim();
+  if (body.resourceUrl !== undefined) {
+    const { url, valid } = sanitizeHttpUrl(body.resourceUrl);
+    if (!valid) {
+      res.status(400).json({ error: 'Tautan materi harus berupa URL http:// atau https:// yang valid.' });
+      return;
+    }
+    material.resourceUrl = url || undefined;
+  }
+  if (body.attachmentDataUrl !== undefined) {
+    const attachmentCheck = sanitizeMaterialAttachment(body.attachmentDataUrl);
+    if (!attachmentCheck.ok) {
+      res.status(400).json({ error: attachmentCheck.error });
+      return;
+    }
+    const dataUrl = attachmentCheck.value;
+    material.attachmentDataUrl = dataUrl || undefined;
+    material.attachmentName =
+      dataUrl && typeof body.attachmentName === 'string' && body.attachmentName.trim()
+        ? body.attachmentName.trim()
+        : undefined;
+  }
+  if (material.materialType !== 'TUGAS') {
+    material.dueDate = undefined;
+  } else if (body.dueDate !== undefined) {
+    material.dueDate =
+      typeof body.dueDate === 'string' && body.dueDate.trim() ? body.dueDate.trim() : undefined;
+  }
+  if (typeof body.isPublished === 'boolean') {
+    material.isPublished = body.isPublished;
+  }
+  material.updatedAt = new Date().toISOString();
+
+  store.commit();
+  sendToAdmins('sync:materials', { action: 'updated', materialId: material.id });
+  broadcastToAllStudents('materials:updated', { action: 'updated', materialId: material.id });
+  res.json({ material });
+});
+
+app.delete('/api/admin/materials/:id', requireAuth, requireStaff, (req: AuthenticatedRequest, res) => {
+  const db = store.getDb();
+  const list = db.materials || [];
+  const idx = list.findIndex((m) => m.id === req.params.id);
+  if (idx === -1) {
+    res.status(404).json({ error: 'Materi pembelajaran tidak ditemukan.' });
+    return;
+  }
+  if (isGuruUser(req.user) && !isMaterialOwnedByTeacher(list[idx], req.user!)) {
+    res.status(403).json({ error: 'Anda hanya dapat menghapus materi pembelajaran milik Anda sendiri.' });
+    return;
+  }
+  const [removed] = list.splice(idx, 1);
+  store.commit();
+  sendToAdmins('sync:materials', { action: 'deleted', materialId: removed.id });
+  broadcastToAllStudents('materials:updated', { action: 'deleted', materialId: removed.id });
   res.json({ ok: true });
 });
 
@@ -1474,6 +1863,24 @@ app.put('/api/admin/banks/:id/questions/:qId', requireAuth, requireStaff, (req: 
   store.commit();
   sendToAdmins('sync:banks', { action: 'question_updated', bankId: bank.id });
   res.json({ question: q, bank });
+});
+
+app.delete('/api/admin/banks/:id/questions', requireAuth, requireStaff, (req: AuthenticatedRequest, res) => {
+  const db = store.getDb();
+  const bank = db.banks.find((b) => b.id === req.params.id);
+  if (!bank) {
+    res.status(404).json({ error: 'Bank soal tidak ditemukan.' });
+    return;
+  }
+  if (isGuruUser(req.user) && !isBankOwnedByTeacher(bank, req.user!)) {
+    res.status(403).json({ error: 'Akses ditolak untuk Bank Soal guru lain.' });
+    return;
+  }
+  bank.questions = [];
+  bank.updatedAt = new Date().toISOString();
+  store.commit();
+  sendToAdmins('sync:banks', { action: 'questions_cleared', bankId: bank.id });
+  res.json({ bank, message: `Semua soal pada bank "${bank.subject}" berhasil dikosongkan.` });
 });
 
 app.delete('/api/admin/banks/:id/questions/:qId', requireAuth, requireStaff, (req: AuthenticatedRequest, res) => {
@@ -2292,12 +2699,142 @@ app.delete('/api/admin/attendance/:id', requireAuth, requireStaff, (req, res) =>
   res.json({ ok: true });
 });
 
+function buildDatabaseCounts(): DatabaseCounts {
+  const db = store.getDb();
+  return {
+    students: db.students.length,
+    teachers: (db.teachers || []).length,
+    banks: db.banks.length,
+    questions: db.banks.reduce((sum, b) => sum + b.questions.length, 0),
+    exams: db.exams.length,
+    sessions: db.sessions.length,
+    violations: db.violations.length,
+    broadcasts: db.broadcasts.length,
+    attendance: db.attendance.length,
+    materials: (db.materials || []).length,
+  };
+}
+
 // Server Management
 app.get('/api/admin/server-status', requireAuth, requireAdmin, (_req, res) => {
   const db = store.getDb();
   res.json({
     metrics: buildServerMetrics(),
     settings: db.settings,
+    counts: buildDatabaseCounts(),
+  });
+});
+
+const ALLOWED_PURGE_TARGETS = new Set<PurgeTarget>([
+  'students',
+  'teachers',
+  'banks',
+  'questions',
+  'exams',
+  'answers',
+  'attendance',
+  'materials',
+]);
+
+app.post('/api/admin/server/purge', requireAuth, requireAdmin, (req, res) => {
+  const confirmText = typeof req.body?.confirmText === 'string' ? req.body.confirmText.trim().toUpperCase() : '';
+  if (confirmText !== 'HAPUS') {
+    res.status(400).json({ error: 'Konfirmasi tidak valid. Ketik HAPUS untuk melanjutkan penghapusan.' });
+    return;
+  }
+
+  const rawTargets: unknown[] = Array.isArray(req.body?.targets) ? req.body.targets : [];
+  const targets = Array.from(
+    new Set<PurgeTarget>(
+      rawTargets.filter(
+        (t): t is PurgeTarget => typeof t === 'string' && ALLOWED_PURGE_TARGETS.has(t as PurgeTarget)
+      )
+    )
+  );
+
+  if (targets.length === 0) {
+    res.status(400).json({ error: 'Pilih minimal satu jenis database yang ingin dihapus.' });
+    return;
+  }
+
+  const db = store.getDb();
+  const clearedLabels: string[] = [];
+
+  if (targets.includes('students')) {
+    db.students = [];
+    db.sessions = [];
+    db.violations = [];
+    clearedLabels.push('Peserta Didik');
+    sendToAdmins('sync:students', { action: 'purged' });
+    sendToAdmins('sync:results', { action: 'purged' });
+  }
+
+  if (targets.includes('teachers')) {
+    db.teachers = [];
+    for (const bank of db.banks) {
+      bank.teacherId = undefined;
+    }
+    for (const mat of db.materials || []) {
+      mat.teacherId = undefined;
+    }
+    clearedLabels.push('Data Guru');
+    sendToAdmins('sync:teachers', { action: 'purged' });
+  }
+
+  if (targets.includes('banks')) {
+    db.banks = [];
+    db.exams = [];
+    db.sessions = [];
+    db.violations = [];
+    clearedLabels.push('Mapel & Bank Soal');
+    sendToAdmins('sync:banks', { action: 'purged' });
+    sendToAdmins('sync:exams', { action: 'purged' });
+    sendToAdmins('sync:results', { action: 'purged' });
+  } else if (targets.includes('questions')) {
+    const now = new Date().toISOString();
+    for (const bank of db.banks) {
+      bank.questions = [];
+      bank.updatedAt = now;
+    }
+    clearedLabels.push('Butir Soal');
+    sendToAdmins('sync:banks', { action: 'questions_purged' });
+  }
+
+  if (targets.includes('exams')) {
+    db.exams = [];
+    db.sessions = [];
+    db.violations = [];
+    clearedLabels.push('Jadwal Ujian');
+    sendToAdmins('sync:exams', { action: 'purged' });
+    sendToAdmins('sync:results', { action: 'purged' });
+  } else if (targets.includes('answers')) {
+    db.sessions = [];
+    db.violations = [];
+    db.broadcasts = [];
+    clearedLabels.push('Jawaban, Nilai & Log Ujian');
+    sendToAdmins('sync:results', { action: 'purged' });
+  }
+
+  if (targets.includes('attendance')) {
+    db.attendance = [];
+    clearedLabels.push('Riwayat Absensi QR');
+    sendToAdmins('attendance:purged', { action: 'purged' });
+  }
+
+  if (targets.includes('materials')) {
+    db.materials = [];
+    clearedLabels.push('Materi Pembelajaran');
+    sendToAdmins('sync:materials', { action: 'purged' });
+    broadcastToAllStudents('materials:updated', { action: 'purged' });
+  }
+
+  store.commit();
+
+  res.json({
+    ok: true,
+    message: `Berhasil mengosongkan database: ${clearedLabels.join(', ')}.`,
+    counts: buildDatabaseCounts(),
+    metrics: buildServerMetrics(),
   });
 });
 
@@ -2365,6 +2902,7 @@ app.post('/api/admin/server/restore', requireAuth, requireAdmin, (req, res) => {
     violations: Array.isArray(payload.violations) ? payload.violations : [],
     broadcasts: Array.isArray(payload.broadcasts) ? payload.broadcasts : [],
     attendance: Array.isArray(payload.attendance) ? payload.attendance : [],
+    materials: Array.isArray(payload.materials) ? payload.materials : [],
   });
   const restored = store.getDb();
   sendToAdmins('sync:settings', restored.settings);
@@ -2373,6 +2911,7 @@ app.post('/api/admin/server/restore', requireAuth, requireAdmin, (req, res) => {
   sendToAdmins('sync:banks', { action: 'restored' });
   sendToAdmins('sync:exams', { action: 'restored' });
   sendToAdmins('sync:results', { action: 'restored' });
+  sendToAdmins('sync:materials', { action: 'restored' });
   res.json({ ok: true, settings: restored.settings, metrics: buildServerMetrics() });
 });
 

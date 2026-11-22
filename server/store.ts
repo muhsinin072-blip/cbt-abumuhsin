@@ -10,6 +10,7 @@ import type {
   BroadcastNotice,
   ExamSchedule,
   ExamSession,
+  LearningMaterial,
   Question,
   QuestionBank,
   SchoolSettings,
@@ -29,6 +30,7 @@ export interface CbtDatabase {
   violations: ViolationLog[];
   broadcasts: BroadcastNotice[];
   attendance: AttendanceRecord[];
+  materials: LearningMaterial[];
 }
 
 function createDefaultTeachers(nowIso: string = new Date().toISOString()): TeacherAccount[] {
@@ -640,6 +642,58 @@ function createInitialSeed(): CbtDatabase {
     },
   ];
 
+  const materials: LearningMaterial[] = [
+    {
+      id: 'mat-mat-1',
+      title: 'Ringkasan Materi & Rumus Cepat Turunan Fungsi Aljabar',
+      subject: 'Matematika Wajib',
+      gradeLevel: 'XII',
+      targetClasses: ['XII TKJ 1', 'XII TKJ 2', 'XII RPL 1'],
+      materialType: 'ARTIKEL',
+      summary: 'Panduan inti aturan pangkat, perkalian, pembagian, dan aturan rantai untuk persiapan ujian.',
+      content:
+        '1. Aturan Pangkat: Jika f(x) = a·x^n, maka f\'(x) = a·n·x^(n-1).\n2. Aturan Perkalian: (u·v)\' = u\'·v + u·v\'.\n3. Aturan Pembagian: (u/v)\' = (u\'·v - u·v\') / v^2.\n4. Nilai stasioner terjadi saat f\'(x) = 0.\n\nPelajari contoh soal pada Bank Soal Matematika Wajib sebelum mengikuti sesi ujian.',
+      teacherId: 'guru-1',
+      teacherName: 'Dra. Siti Aminah, M.Pd.',
+      isPublished: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'mat-indo-1',
+      title: 'Struktur & Kaidah Kebahasaan Teks Artikel Opini',
+      subject: 'Bahasa Indonesia',
+      gradeLevel: 'XII',
+      targetClasses: [],
+      materialType: 'ARTIKEL',
+      summary: 'Cara membedakan fakta dan opini serta menyusun argumentasi yang logis dan efektif.',
+      content:
+        'Teks artikel opini terdiri atas:\n- Pernyataan pendapat (tesis)\n- Argumentasi berbasis data dan fakta\n- Pernyataan ulang pendapat (penegasan)\n\nPerhatikan penggunaan konjungsi kausalitas, kosakata baku sesuai KBBI, dan kalimat efektif.',
+      teacherId: 'guru-3',
+      teacherName: 'Rina Kusuma, S.Pd.',
+      isPublished: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'mat-tkj-1',
+      title: 'Latihan Subnetting IPv4 & Routing Dasar Mikrotik',
+      subject: 'Administrasi Infrastruktur Jaringan',
+      gradeLevel: 'XII',
+      targetClasses: ['XII TKJ 1', 'XII TKJ 2'],
+      materialType: 'TUGAS',
+      summary: 'Latihan pembagian blok CIDR /26 dan /27 serta penentuan gateway jaringan lokal.',
+      content:
+        'Kerjakan latihan perhitungan Network ID, Broadcast Address, dan rentang Host Valid untuk prefix /26 dan /27 pada buku catatan praktik sebelum jadwal ujian berlangsung.',
+      teacherId: 'guru-2',
+      teacherName: 'Budi Santoso, S.Kom.',
+      isPublished: true,
+      dueDate: todayDate,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+
   return {
     settings: {
       schoolName: 'SMK NEGERI 1 NUSANTARA',
@@ -670,6 +724,7 @@ function createInitialSeed(): CbtDatabase {
     violations,
     broadcasts: [],
     attendance,
+    materials,
   };
 }
 
@@ -683,6 +738,7 @@ const COLLECTIONS = [
   'violations',
   'broadcasts',
   'attendance',
+  'materials',
 ] as const;
 
 type CollectionName = (typeof COLLECTIONS)[number];
@@ -737,9 +793,6 @@ function normalizeDb(parsed: CbtDatabase): CbtDatabase {
       (parsed as unknown as Record<CollectionName, unknown[]>)[name] = [];
     }
   }
-  if (parsed.teachers.length === 0) {
-    parsed.teachers = createDefaultTeachers();
-  }
   for (const bank of parsed.banks) {
     if (!bank.teacherId && bank.teacherName) {
       const matched = parsed.teachers.find(
@@ -747,6 +800,16 @@ function normalizeDb(parsed: CbtDatabase): CbtDatabase {
       );
       if (matched) {
         bank.teacherId = matched.id;
+      }
+    }
+  }
+  for (const mat of parsed.materials) {
+    if (!mat.teacherId && mat.teacherName) {
+      const matched = parsed.teachers.find(
+        (t) => t.fullName.trim().toLowerCase() === mat.teacherName.trim().toLowerCase()
+      );
+      if (matched) {
+        mat.teacherId = matched.id;
       }
     }
   }

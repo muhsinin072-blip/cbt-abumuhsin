@@ -264,7 +264,35 @@ export type PurgeTarget =
   | 'questions'
   | 'exams'
   | 'answers'
-  | 'attendance';
+  | 'attendance'
+  | 'materials';
+
+export type LearningMaterialType =
+  | 'ARTIKEL'
+  | 'PDF_MODUL'
+  | 'VIDEO'
+  | 'TAUTAN'
+  | 'TUGAS';
+
+export interface LearningMaterial {
+  id: string;
+  title: string;
+  subject: string;
+  gradeLevel: string;
+  targetClasses: string[];
+  materialType: LearningMaterialType;
+  summary: string;
+  content: string;
+  resourceUrl?: string;
+  attachmentName?: string;
+  attachmentDataUrl?: string;
+  teacherId?: string;
+  teacherName: string;
+  isPublished: boolean;
+  dueDate?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface DatabaseCounts {
   students: number;
@@ -276,4 +304,5 @@ export interface DatabaseCounts {
   violations: number;
   broadcasts: number;
   attendance: number;
+  materials?: number;
 }

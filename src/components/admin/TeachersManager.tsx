@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   CheckCircle2,
+  Download,
   GraduationCap,
   KeyRound,
   Pencil,
   Plus,
   Search,
   Trash2,
+  Upload,
   UserX,
 } from 'lucide-react';
 import { apiFetch, createCbtWebSocket } from '../../lib/api';
 import type { TeacherListItem, TeachersResponse } from '../../lib/api';
+import { downloadTeacherTemplate, parseTeacherExcel } from '../../lib/excel';
 
 export const TeachersManager: React.FC = () => {
   const [teachers, setTeachers] = useState<TeacherListItem[]>([]);
@@ -28,6 +31,12 @@ export const TeachersManager: React.FC = () => {
   const [isActive, setIsActive] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState('');
+  const [importing, setImporting] = useState(false);
+
+  const [purgeModalOpen, setPurgeModalOpen] = useState(false);
+  const [purgeConfirmText, setPurgeConfirmText] = useState('');
+  const [purging, setPurging] = useState(false);
+  const [purgeError, setPurgeError] = useState('');
 
   const loadTeachers = useCallback(async () => {
     setLoading(true);
@@ -140,6 +149,72 @@ export const TeachersManager: React.FC = () => {
     }
   };
 
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setError('');
+    setNotice('');
+    setImporting(true);
+    try {
+      const parsed = await parseTeacherExcel(file);
+      const valid = parsed.filter((r) => r.issues.length === 0);
+      if (valid.length === 0) {
+        const firstIssue = parsed[0]?.issues.join(', ');
+        setError(
+          firstIssue
+            ? `Tidak ada baris guru valid pada file (${firstIssue}).`
+            : 'Tidak ada baris guru valid pada file Excel/CSV (pastikan kolom NIP/Username dan Nama Lengkap terisi).'
+        );
+        return;
+      }
+      const res = await apiFetch<{
+        added: number;
+        updated: number;
+        skipped?: number;
+        teachers: TeacherListItem[];
+      }>('/api/admin/teachers/import', {
+        method: 'POST',
+        body: JSON.stringify({ teachers: valid }),
+      });
+      setTeachers(res.teachers);
+      const invalidCount = parsed.length - valid.length + (res.skipped || 0);
+      setNotice(
+        `Upload data guru selesai: ${res.added} guru baru ditambahkan, ${res.updated} diperbarui${
+          invalidCount > 0 ? `, ${invalidCount} baris dilewati` : ''
+        }.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal mengunggah file Excel/CSV data guru.');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handlePurgeAllTeachers = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (purgeConfirmText.trim().toUpperCase() !== 'HAPUS') {
+      setPurgeError('Ketik kata HAPUS untuk mengonfirmasi.');
+      return;
+    }
+    setPurging(true);
+    setPurgeError('');
+    try {
+      await apiFetch('/api/admin/server/purge', {
+        method: 'POST',
+        body: JSON.stringify({ targets: ['teachers'], confirmText: 'HAPUS' }),
+      });
+      setTeachers([]);
+      setPurgeModalOpen(false);
+      setPurgeConfirmText('');
+      setNotice('Seluruh akun guru berhasil dihapus (Bank Soal yang ada tetap tersimpan).');
+    } catch (err) {
+      setPurgeError(err instanceof Error ? err.message : 'Gagal menghapus semua akun guru.');
+    } finally {
+      setPurging(false);
+    }
+  };
+
   const filtered = teachers.filter((t) => {
     const q = search.toLowerCase().trim();
     if (!q) return true;
@@ -160,14 +235,49 @@ export const TeachersManager: React.FC = () => {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => openModal()}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          Tambah Akun Guru
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => void downloadTeacherTemplate()}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-sm font-semibold text-slate-700 whitespace-nowrap"
+          >
+            <Download className="w-4 h-4" />
+            Template Guru
+          </button>
+          <label className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-teal-700 bg-teal-50 hover:bg-teal-100 text-teal-800 text-sm font-semibold cursor-pointer whitespace-nowrap">
+            <Upload className="w-4 h-4" />
+            {importing ? 'Mengunggah...' : 'Upload Excel'}
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              disabled={importing}
+              onChange={handleImportExcel}
+              className="hidden"
+            />
+          </label>
+          {teachers.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setPurgeConfirmText('');
+                setPurgeError('');
+                setPurgeModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-red-300 bg-red-50 hover:bg-red-600 hover:text-white hover:border-red-600 text-red-700 text-sm font-semibold whitespace-nowrap transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Hapus Semua Guru
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => openModal()}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold whitespace-nowrap shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            Tambah Akun Guru
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -408,6 +518,58 @@ export const TeachersManager: React.FC = () => {
                   className="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 disabled:bg-slate-400 text-white text-sm font-semibold"
                 >
                   {saving ? 'Menyimpan...' : 'Simpan Akun Guru'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {purgeModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-xl border border-red-200 overflow-hidden">
+            <div className="px-6 py-4 bg-red-600 text-white">
+              <h3 className="text-base font-bold">Hapus Semua Akun Guru</h3>
+            </div>
+            <form onSubmit={handlePurgeAllTeachers} className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Tindakan ini akan menghapus seluruh{' '}
+                <strong className="font-mono text-slate-900">{teachers.length} akun guru</strong>{' '}
+                secara permanen. Bank Soal yang sudah dibuat tetap tersimpan di panel Proktor.
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Ketik <span className="font-mono font-bold text-red-700">HAPUS</span> untuk melanjutkan:
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={purgeConfirmText}
+                  onChange={(e) => setPurgeConfirmText(e.target.value)}
+                  placeholder="Ketik HAPUS"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm uppercase tracking-wider"
+                />
+              </div>
+              {purgeError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-medium">
+                  {purgeError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPurgeModalOpen(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={purging || purgeConfirmText.trim().toUpperCase() !== 'HAPUS'}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white text-sm font-semibold"
+                >
+                  {purging ? 'Menghapus...' : 'Ya, Hapus Semua'}
                 </button>
               </div>
             </form>

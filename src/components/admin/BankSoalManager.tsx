@@ -3,6 +3,7 @@ import {
   BookOpen,
   Download,
   FileSpreadsheet,
+  FileText,
   Pencil,
   Plus,
   Trash2,
@@ -12,6 +13,7 @@ import { apiFetch, createCbtWebSocket } from '../../lib/api';
 import type { BanksResponse, TeacherListItem, TeachersResponse } from '../../lib/api';
 import { downloadQuestionTemplate, parseQuestionExcel } from '../../lib/excel';
 import type { ParsedExcelQuestion } from '../../lib/excel';
+import { downloadWordQuestionTemplate, parseQuestionWord } from '../../lib/word';
 import type { Question, QuestionBank, QuestionType, UserRole } from '../../types/cbt';
 
 interface BankSoalManagerProps {
@@ -56,8 +58,9 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
   const [qWeight, setQWeight] = useState(10);
   const [qModalError, setQModalError] = useState('');
 
-  // Excel Import Preview Modal
+  // Excel & Word Import Preview Modal
   const [importPreview, setImportPreview] = useState<ParsedExcelQuestion[] | null>(null);
+  const [importSource, setImportSource] = useState<'Excel' | 'Word'>('Excel');
   const [replaceExisting, setReplaceExisting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importModalError, setImportModalError] = useState('');
@@ -231,9 +234,25 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
     setImportModalError('');
     try {
       const parsed = await parseQuestionExcel(file);
+      setImportSource('Excel');
       setImportPreview(parsed);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal membaca file Excel soal.');
+    }
+  };
+
+  const handleWordFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setError('');
+    setImportModalError('');
+    try {
+      const parsed = await parseQuestionWord(file);
+      setImportSource('Word');
+      setImportPreview(parsed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal membaca file Word soal.');
     }
   };
 
@@ -259,7 +278,9 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
       );
       setBanks((prev) => prev.map((b) => (b.id === res.bank.id ? res.bank : b)));
       setImportPreview(null);
-      setNotice(`Berhasil mengimpor ${res.importedCount} soal dari Excel ke bank ${res.bank.code}.`);
+      setNotice(
+        `Berhasil mengimpor ${res.importedCount} soal dari ${importSource} ke bank ${res.bank.code}.`
+      );
     } catch (err) {
       setImportModalError(err instanceof Error ? err.message : 'Gagal mengimpor soal ke server.');
     } finally {
@@ -313,9 +334,9 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Bank Soal & Import Excel</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Bank Soal & Import</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Kelola paket soal Pilihan Ganda / Esai atau impor massal menggunakan format Excel CandyCBT.
+            Kelola paket soal Pilihan Ganda / Esai atau impor massal menggunakan Template Word (.docx) dan Excel (.xlsx).
           </p>
         </div>
 
@@ -334,6 +355,14 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
               Hapus Semua Mapel & Soal
             </button>
           )}
+          <button
+            type="button"
+            onClick={downloadWordQuestionTemplate}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-blue-300 bg-blue-50 hover:bg-blue-100 text-sm font-semibold text-blue-800 whitespace-nowrap shrink-0 transition-colors"
+          >
+            <FileText className="w-4 h-4" />
+            Template Word (.docx)
+          </button>
           <button
             type="button"
             onClick={downloadQuestionTemplate}
@@ -439,6 +468,16 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
+                  <label className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-blue-600 text-blue-800 bg-blue-50 hover:bg-blue-100 text-sm font-semibold cursor-pointer whitespace-nowrap transition-colors">
+                    <FileText className="w-4 h-4" />
+                    Import Soal Word
+                    <input
+                      type="file"
+                      accept=".docx,.doc,.txt"
+                      onChange={handleWordFileSelected}
+                      className="hidden"
+                    />
+                  </label>
                   <label className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-teal-700 text-teal-800 bg-teal-50 hover:bg-teal-100 text-sm font-semibold cursor-pointer whitespace-nowrap">
                     <Upload className="w-4 h-4" />
                     Import Soal Excel
@@ -475,12 +514,27 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
               </div>
 
               {selectedBank.questions.length === 0 ? (
-                <div className="p-12 text-center space-y-3">
+                <div className="p-10 text-center space-y-4">
                   <FileSpreadsheet className="w-10 h-10 text-slate-300 mx-auto" />
-                  <p className="text-base font-semibold text-slate-900">Bank Soal Masih Kosong</p>
-                  <p className="text-sm text-slate-500 max-w-md mx-auto">
-                    Unduh template Excel CandyCBT lalu unggah file .xlsx Anda untuk mengimpor puluhan soal sekaligus.
-                  </p>
+                  <div>
+                    <p className="text-base font-semibold text-slate-900">Bank Soal Masih Kosong</p>
+                    <p className="text-sm text-slate-500 max-w-lg mx-auto mt-1">
+                      Unduh Template Word (.docx) atau Excel (.xlsx), isi daftar soal dengan format tulisan mudah, lalu unggah ke bank soal ini.
+                    </p>
+                  </div>
+                  <div className="max-w-md mx-auto text-left bg-slate-50 border border-slate-200 rounded-lg p-3.5 text-xs text-slate-700 font-mono leading-relaxed">
+                    <p className="font-sans font-semibold text-slate-800 mb-1.5">
+                      Contoh Format Mudah di Word (.docx):
+                    </p>
+                    <p>1. Ibu kota negara Indonesia yang baru adalah ...</p>
+                    <p>A. Jakarta</p>
+                    <p>B. Bandung</p>
+                    <p>C. Nusantara</p>
+                    <p className="text-emerald-700 font-semibold">Kunci: C</p>
+                    <p className="mt-1.5 text-slate-500">
+                      2. [ESAI] Jelaskan perbedaan topologi Star dan Mesh!
+                    </p>
+                  </div>
                 </div>
               ) : (
                 <div className="divide-y divide-slate-200">
@@ -837,15 +891,15 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
         </div>
       )}
 
-      {/* Excel Import Preview Modal */}
+      {/* Excel / Word Import Preview Modal */}
       {importPreview && selectedBank && (
         <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
           <div className="max-w-5xl w-full bg-white rounded-xl border border-slate-200 overflow-hidden flex flex-col max-h-[88vh]">
             <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
               <div>
-                <h3 className="text-base font-bold">Pratinjau Import Soal Excel</h3>
+                <h3 className="text-base font-bold">Pratinjau Import Soal {importSource}</h3>
                 <p className="text-xs text-slate-300">
-                  Target Bank: {selectedBank.code} ({selectedBank.subject}) · Total {importPreview.length} baris terbaca
+                  Target Bank: {selectedBank.code} ({selectedBank.subject}) · Total {importPreview.length} soal terbaca
                 </p>
               </div>
               <label className="flex items-center gap-2 text-xs font-medium text-slate-200 cursor-pointer">
@@ -863,7 +917,7 @@ export const BankSoalManager: React.FC<BankSoalManagerProps> = ({
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                    <th className="p-2.5 font-semibold">Baris</th>
+                    <th className="p-2.5 font-semibold">{importSource === 'Word' ? 'No' : 'Baris'}</th>
                     <th className="p-2.5 font-semibold">Jenis</th>
                     <th className="p-2.5 font-semibold">Pertanyaan</th>
                     <th className="p-2.5 font-semibold">Kunci</th>

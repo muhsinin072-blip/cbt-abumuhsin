@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  NotebookPen,
   QrCode,
   ShieldAlert,
   UserCog,
@@ -25,9 +26,11 @@ import { BankSoalManager } from '../admin/BankSoalManager';
 import { HasilLaporan } from '../admin/HasilLaporan';
 import { JadwalUjianManager } from '../admin/JadwalUjianManager';
 import { LiveMonitoring } from '../admin/LiveMonitoring';
+import { PembelajaranManager } from '../admin/PembelajaranManager';
 
 type TeacherTab =
   | 'overview'
+  | 'learning'
   | 'banks'
   | 'exams'
   | 'monitoring'
@@ -144,7 +147,8 @@ export const TeacherLayout: React.FC<TeacherLayoutProps> = ({
 
   const navItems: { id: TeacherTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'overview', label: 'Beranda Guru', icon: LayoutDashboard },
-    { id: 'banks', label: 'Bank Soal & Excel', icon: BookOpen },
+    { id: 'learning', label: 'Pembelajaran', icon: NotebookPen },
+    { id: 'banks', label: 'Bank Soal & Import', icon: BookOpen },
     { id: 'exams', label: 'Jadwal & Token', icon: CalendarClock },
     { id: 'monitoring', label: 'Pemantauan Live', icon: ShieldAlert },
     { id: 'results', label: 'Hasil & Koreksi Esai', icon: FileBarChart2 },
@@ -348,6 +352,14 @@ export const TeacherLayout: React.FC<TeacherLayoutProps> = ({
             <LiveClockDate variant="inline" className="hidden xl:inline-flex mr-1" />
             <button
               type="button"
+              onClick={() => setActiveTab('learning')}
+              className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-teal-700/40 bg-teal-50/90 hover:bg-teal-100 text-teal-800 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
+            >
+              <NotebookPen className="w-3.5 h-3.5 text-teal-700" />
+              Pembelajaran
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveTab('attendance')}
               className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300/80 bg-white/90 hover:bg-slate-50 text-slate-700 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
             >
@@ -442,7 +454,16 @@ export const TeacherLayout: React.FC<TeacherLayoutProps> = ({
                   </div>
 
                   {/* Quick Actions Row */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('learning')}
+                      className="p-4 rounded-xl cbt-soft-panel hover:border-teal-400 text-left transition-colors"
+                    >
+                      <NotebookPen className="w-5 h-5 text-teal-700 mb-2" />
+                      <p className="text-sm font-bold text-slate-900">Pembelajaran</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Bagikan modul, video &amp; tugas</p>
+                    </button>
                     <button
                       type="button"
                       onClick={() => setActiveTab('banks')}
@@ -450,7 +471,7 @@ export const TeacherLayout: React.FC<TeacherLayoutProps> = ({
                     >
                       <BookOpen className="w-5 h-5 text-teal-700 mb-2" />
                       <p className="text-sm font-bold text-slate-900">Kelola Bank Soal</p>
-                      <p className="text-xs text-slate-500 mt-0.5">Import Excel atau tulis soal</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Import Word/Excel atau tulis soal</p>
                     </button>
                     <button
                       type="button"
@@ -561,6 +582,13 @@ export const TeacherLayout: React.FC<TeacherLayoutProps> = ({
             </div>
           )}
 
+          {activeTab === 'learning' && (
+            <PembelajaranManager
+              userRole="guru"
+              defaultSubject={user.subject}
+              teacherNameDefault={user.name}
+            />
+          )}
           {activeTab === 'banks' && (
             <BankSoalManager userRole="guru" teacherNameDefault={user.name} />
           )}

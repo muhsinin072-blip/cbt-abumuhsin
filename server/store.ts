@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { dbFlushChanges, dbLoadDocsAndPresence, dbPurgeOldEvents } from './db.ts';
+import {
+  dbFlushChanges,
+  dbLoadDocsAndPresence,
+  dbLoadPresence,
+  dbPurgeOldEvents,
+  isUsingPostgres,
+} from './db.ts';
 import { hashPassword } from './auth.ts';
 import type {
   AdminAccount,
@@ -763,6 +769,7 @@ export interface StoreContext {
   events: PendingEvent[];
   presence: { students: number; staff: number };
   sizeBytes: number;
+  dirty: boolean;
 }
 
 interface DocRow {
@@ -772,7 +779,19 @@ interface DocRow {
   data: unknown;
 }
 
+interface CachedStoreState {
+  db: CbtDatabase;
+  snapshot: Map<string, SnapshotEntry>;
+  presence: { students: number; staff: number };
+  sizeBytes: number;
+  loadedAt: number;
+  presenceLoadedAt: number;
+}
+
 const contextStorage = new AsyncLocalStorage<StoreContext>();
+const USE_IN_PROCESS_CACHE = process.env.VERCEL !== '1';
+const PG_CACHE_TTL_MS = 2000;
+const PRESENCE_REFRESH_MS = 4000;
 
 function docKey(collection: string, id: string): string {
   return `${collection}\u0000${id}`;
@@ -877,57 +896,164 @@ function assignPositions(collection: string, items: { id?: unknown }[], snapshot
   return result;
 }
 
-class StoreManager {
-  async load(): Promise<StoreContext> {
-    const { docs, presence } = await dbLoadDocsAndPresence();
+function buildStateFromDocs(
+  docs: DocRow[],
+  presence: { students: number; staff: number }
+): { db: CbtDatabase; snapshot: Map<string, SnapshotEntry>; sizeBytes: number; seeded: boolean } {
+  const snapshot = new Map<string, SnapshotEntry>();
 
-    const snapshot = new Map<string, SnapshotEntry>();
-
-    if (docs.length === 0) {
-      const seed = normalizeDb(readLegacySeedFile() || createInitialSeed());
-      const ctx: StoreContext = { db: seed, snapshot, events: [], presence, sizeBytes: 0 };
-      await this.flush(ctx);
-      return ctx;
-    }
-
-    const draft: Record<string, unknown[]> = {};
-    for (const name of COLLECTIONS) draft[name] = [];
-    let settings: SchoolSettings | null = null;
-    let sizeBytes = 0;
-
-    for (const row of docs) {
-      const json = JSON.stringify(row.data);
-      sizeBytes += json.length;
-      snapshot.set(docKey(row.collection, row.id), { json, pos: Number(row.pos) });
-      if (row.collection === SETTINGS_COLLECTION) {
-        settings = row.data as SchoolSettings;
-      } else if (draft[row.collection]) {
-        draft[row.collection].push(row.data);
-      }
-    }
-
-    const db = normalizeDb({
-      ...(draft as unknown as Omit<CbtDatabase, 'settings'>),
-      settings: settings || createInitialSeed().settings,
-    } as CbtDatabase);
-
-    return { db, snapshot, events: [], presence, sizeBytes };
+  if (docs.length === 0) {
+    const seed = normalizeDb(readLegacySeedFile() || createInitialSeed());
+    return { db: seed, snapshot, sizeBytes: 0, seeded: true };
   }
 
-  async flush(ctx: StoreContext): Promise<void> {
+  const draft: Record<string, unknown[]> = {};
+  for (const name of COLLECTIONS) draft[name] = [];
+  let settings: SchoolSettings | null = null;
+  let sizeBytes = 0;
+
+  for (const row of docs) {
+    const json = JSON.stringify(row.data);
+    sizeBytes += json.length;
+    snapshot.set(docKey(row.collection, row.id), { json, pos: Number(row.pos) });
+    if (row.collection === SETTINGS_COLLECTION) {
+      settings = row.data as SchoolSettings;
+    } else if (draft[row.collection]) {
+      draft[row.collection].push(row.data);
+    }
+  }
+
+  const db = normalizeDb({
+    ...(draft as unknown as Omit<CbtDatabase, 'settings'>),
+    settings: settings || createInitialSeed().settings,
+  } as CbtDatabase);
+
+  return { db, snapshot, sizeBytes, seeded: false };
+}
+
+class StoreManager {
+  private cache: CachedStoreState | null = null;
+  private loadPromise: Promise<CachedStoreState> | null = null;
+  private flushChain: Promise<void> = Promise.resolve();
+  private pendingFlushes = 0;
+  private presenceRefreshing = false;
+
+  private async loadFreshIntoCache(): Promise<CachedStoreState> {
+    if (this.pendingFlushes > 0) {
+      await this.flushChain;
+    }
+    const { docs, presence } = await dbLoadDocsAndPresence();
+    const built = buildStateFromDocs(docs, presence);
+    const now = Date.now();
+    const state: CachedStoreState = {
+      db: built.db,
+      snapshot: built.snapshot,
+      presence,
+      sizeBytes: built.sizeBytes,
+      loadedAt: now,
+      presenceLoadedAt: now,
+    };
+    if (built.seeded) {
+      const seedCtx: StoreContext = {
+        db: state.db,
+        snapshot: state.snapshot,
+        events: [],
+        presence: state.presence,
+        sizeBytes: 0,
+        dirty: true,
+      };
+      await this.performFlush(seedCtx, state);
+    }
+    this.cache = state;
+    return state;
+  }
+
+  private refreshPresenceAsync(state: CachedStoreState): void {
+    if (this.presenceRefreshing) return;
+    this.presenceRefreshing = true;
+    dbLoadPresence()
+      .then((presence) => {
+        state.presence = presence;
+        state.presenceLoadedAt = Date.now();
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.presenceRefreshing = false;
+      });
+  }
+
+  async load(): Promise<StoreContext> {
+    if (USE_IN_PROCESS_CACHE) {
+      const now = Date.now();
+      const cacheStale =
+        !this.cache ||
+        (isUsingPostgres && this.pendingFlushes === 0 && now - this.cache.loadedAt > PG_CACHE_TTL_MS);
+
+      if (cacheStale) {
+        if (!this.loadPromise) {
+          this.loadPromise = this.loadFreshIntoCache().finally(() => {
+            this.loadPromise = null;
+          });
+        }
+        const state = await this.loadPromise;
+        return {
+          db: state.db,
+          snapshot: state.snapshot,
+          events: [],
+          presence: state.presence,
+          sizeBytes: state.sizeBytes,
+          dirty: false,
+        };
+      }
+
+      const cached = this.cache!;
+      if (now - cached.presenceLoadedAt > PRESENCE_REFRESH_MS) {
+        this.refreshPresenceAsync(cached);
+      }
+
+      return {
+        db: cached.db,
+        snapshot: cached.snapshot,
+        events: [],
+        presence: cached.presence,
+        sizeBytes: cached.sizeBytes,
+        dirty: false,
+      };
+    }
+
+    const { docs, presence } = await dbLoadDocsAndPresence();
+    const built = buildStateFromDocs(docs, presence);
+    const ctx: StoreContext = {
+      db: built.db,
+      snapshot: built.snapshot,
+      events: [],
+      presence,
+      sizeBytes: built.sizeBytes,
+      dirty: built.seeded,
+    };
+    if (built.seeded) {
+      await this.performFlush(ctx);
+      ctx.dirty = false;
+    }
+    return ctx;
+  }
+
+  private async performFlush(ctx: StoreContext, cacheTarget?: CachedStoreState): Promise<void> {
+    const dbRef = cacheTarget ? cacheTarget.db : ctx.db;
+    const baseSnapshot = cacheTarget ? cacheTarget.snapshot : ctx.snapshot;
     const upserts: DocRow[] = [];
     const nextSnapshot = new Map<string, SnapshotEntry>();
 
     const settingsKey = docKey(SETTINGS_COLLECTION, SETTINGS_ID);
-    const settingsJson = JSON.stringify(ctx.db.settings);
+    const settingsJson = JSON.stringify(dbRef.settings);
     nextSnapshot.set(settingsKey, { json: settingsJson, pos: 0 });
-    if (ctx.snapshot.get(settingsKey)?.json !== settingsJson) {
-      upserts.push({ collection: SETTINGS_COLLECTION, id: SETTINGS_ID, pos: 0, data: ctx.db.settings });
+    if (baseSnapshot.get(settingsKey)?.json !== settingsJson) {
+      upserts.push({ collection: SETTINGS_COLLECTION, id: SETTINGS_ID, pos: 0, data: dbRef.settings });
     }
 
     for (const name of COLLECTIONS) {
-      const items = (Array.isArray(ctx.db[name]) ? ctx.db[name] : []) as unknown as { id?: unknown }[];
-      const positions = assignPositions(name, items, ctx.snapshot);
+      const items = (Array.isArray(dbRef[name]) ? dbRef[name] : []) as unknown as { id?: unknown }[];
+      const positions = assignPositions(name, items, baseSnapshot);
       items.forEach((item, idx) => {
         if (!item || typeof item.id !== 'string' || !item.id) return;
         const key = docKey(name, item.id);
@@ -935,7 +1061,7 @@ class StoreManager {
         const json = JSON.stringify(item);
         const pos = positions[idx];
         nextSnapshot.set(key, { json, pos });
-        const prev = ctx.snapshot.get(key);
+        const prev = baseSnapshot.get(key);
         if (!prev || prev.json !== json || prev.pos !== pos) {
           upserts.push({ collection: name, id: item.id, pos, data: item });
         }
@@ -943,7 +1069,7 @@ class StoreManager {
     }
 
     const deletes: { collection: string; id: string }[] = [];
-    for (const key of ctx.snapshot.keys()) {
+    for (const key of baseSnapshot.keys()) {
       if (!nextSnapshot.has(key)) {
         const [collection, id] = key.split('\u0000');
         deletes.push({ collection, id });
@@ -962,12 +1088,40 @@ class StoreManager {
       throw err;
     }
 
+    const totalBytes = Array.from(nextSnapshot.values()).reduce((sum, e) => sum + e.json.length, 0);
     ctx.snapshot = nextSnapshot;
-    ctx.sizeBytes = Array.from(nextSnapshot.values()).reduce((sum, e) => sum + e.json.length, 0);
+    ctx.sizeBytes = totalBytes;
+    if (cacheTarget) {
+      cacheTarget.snapshot = nextSnapshot;
+      cacheTarget.sizeBytes = totalBytes;
+      cacheTarget.loadedAt = Date.now();
+    }
 
     if (Math.random() < 0.02) {
       dbPurgeOldEvents();
     }
+  }
+
+  async flush(ctx: StoreContext): Promise<void> {
+    if (!ctx.dirty && ctx.events.length === 0) {
+      return;
+    }
+
+    if (USE_IN_PROCESS_CACHE) {
+      this.pendingFlushes += 1;
+      const task = this.flushChain
+        .then(
+          () => this.performFlush(ctx, this.cache || undefined),
+          () => this.performFlush(ctx, this.cache || undefined)
+        )
+        .finally(() => {
+          this.pendingFlushes = Math.max(0, this.pendingFlushes - 1);
+        });
+      this.flushChain = task.catch(() => undefined);
+      return task;
+    }
+
+    return this.performFlush(ctx);
   }
 
   run<T>(ctx: StoreContext, fn: () => T): T {
@@ -986,11 +1140,21 @@ class StoreManager {
     return this.current().db;
   }
 
-  // Persistence happens once per request in flush(); kept so route handlers stay unchanged.
-  commit(): void {}
+  commit(): void {
+    const ctx = contextStorage.getStore();
+    if (ctx) {
+      ctx.dirty = true;
+    }
+  }
 
   replaceAll(nextDb: CbtDatabase): void {
-    this.current().db = normalizeDb(nextDb);
+    const ctx = this.current();
+    const normalized = normalizeDb(nextDb);
+    ctx.db = normalized;
+    ctx.dirty = true;
+    if (this.cache) {
+      this.cache.db = normalized;
+    }
   }
 
   emit(audience: string, event: string, payload: unknown): void {

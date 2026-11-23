@@ -28,33 +28,68 @@ export function clearAuthToken(): void {
   memoryToken = '';
 }
 
+const TRANSIENT_HTTP_STATUS = new Set([502, 503, 504]);
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers || {});
-  if (!headers.has('Content-Type') && options.body && !(options.body instanceof FormData)) {
-    headers.set('Content-Type', 'application/json');
-  }
-  if (memoryToken) {
-    headers.set('Authorization', `Bearer ${memoryToken}`);
-  }
+  const maxAttempts = 3;
+  let lastError: Error | null = null;
 
-  const res = await fetch(url, {
-    ...options,
-    headers,
-  });
-
-  const contentType = res.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data?.error || `Terjadi kesalahan server (${res.status})`);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const headers = new Headers(options.headers || {});
+    if (!headers.has('Content-Type') && options.body && !(options.body instanceof FormData)) {
+      headers.set('Content-Type', 'application/json');
     }
-    return data as T;
+    if (memoryToken) {
+      headers.set('Authorization', `Bearer ${memoryToken}`);
+    }
+
+    try {
+      const res = await fetch(url, {
+        ...options,
+        headers,
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok) {
+          const errMsg = data?.error || `Terjadi kesalahan server (${res.status})`;
+          if (attempt < maxAttempts - 1 && TRANSIENT_HTTP_STATUS.has(res.status)) {
+            lastError = new Error(errMsg);
+            await delayMs(250 * (attempt + 1) + Math.floor(Math.random() * 200));
+            continue;
+          }
+          throw new Error(errMsg);
+        }
+        return data as T;
+      }
+
+      if (!res.ok) {
+        const errMsg = `Permintaan gagal (${res.status})`;
+        if (attempt < maxAttempts - 1 && TRANSIENT_HTTP_STATUS.has(res.status)) {
+          lastError = new Error(errMsg);
+          await delayMs(250 * (attempt + 1) + Math.floor(Math.random() * 200));
+          continue;
+        }
+        throw new Error(errMsg);
+      }
+      return (await res.text()) as unknown as T;
+    } catch (err) {
+      const isNetworkErr = err instanceof TypeError;
+      if (attempt < maxAttempts - 1 && isNetworkErr) {
+        lastError = err;
+        await delayMs(250 * (attempt + 1) + Math.floor(Math.random() * 200));
+        continue;
+      }
+      throw err instanceof Error ? err : lastError || new Error('Gagal terhubung ke server.');
+    }
   }
 
-  if (!res.ok) {
-    throw new Error(`Permintaan gagal (${res.status})`);
-  }
-  return (await res.text()) as unknown as T;
+  throw lastError || new Error('Gagal terhubung ke server.');
 }
 
 interface RealtimeListener {
@@ -62,7 +97,8 @@ interface RealtimeListener {
   onStatusChange?: (connected: boolean) => void;
 }
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = 4500;
+const POLL_ERROR_BACKOFF_MS = 7000;
 const realtimeListeners = new Set<RealtimeListener>();
 let realtimeCursor: number | null = null;
 let realtimeToken = '';
@@ -78,11 +114,13 @@ function setRealtimeConnected(connected: boolean): void {
   }
 }
 
-function scheduleRealtimePoll(delay = POLL_INTERVAL_MS): void {
+function scheduleRealtimePoll(delay?: number): void {
   if (realtimeTimer !== null) {
     window.clearTimeout(realtimeTimer);
   }
-  realtimeTimer = window.setTimeout(pollRealtime, delay);
+  const jitter = Math.floor(Math.random() * 1200) - 400;
+  const effectiveDelay = delay !== undefined ? delay : Math.max(1500, POLL_INTERVAL_MS + jitter);
+  realtimeTimer = window.setTimeout(pollRealtime, effectiveDelay);
 }
 
 async function pollRealtime(): Promise<void> {
@@ -99,6 +137,7 @@ async function pollRealtime(): Promise<void> {
   }
 
   realtimeInFlight = true;
+  let hadError = false;
   try {
     const res = await apiFetch<{ cursor: number; events: { event: string; payload: unknown }[] }>(
       `/api/events?after=${realtimeCursor ?? -1}`
@@ -115,11 +154,12 @@ async function pollRealtime(): Promise<void> {
       }
     }
   } catch {
+    hadError = true;
     setRealtimeConnected(false);
   } finally {
     realtimeInFlight = false;
     if (realtimeListeners.size > 0) {
-      scheduleRealtimePoll();
+      scheduleRealtimePoll(hadError ? POLL_ERROR_BACKOFF_MS : undefined);
     }
   }
 }

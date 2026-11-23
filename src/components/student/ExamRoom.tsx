@@ -198,7 +198,7 @@ export const ExamRoom: React.FC<ExamRoomProps> = ({
           currentQuestionIndex: currentIdxRef.current,
         });
       }
-    }, 10_000);
+    }, 15_000);
 
     return () => {
       window.clearInterval(heartbeat);

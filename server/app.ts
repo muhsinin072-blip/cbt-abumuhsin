@@ -72,12 +72,32 @@ function audiencesFor(user: TokenPayload): string[] {
   return [STAFF_AUDIENCE];
 }
 
+const PRESENCE_WRITE_MIN_MS = 15_000;
+const lastPresenceWriteAt = new Map<string, number>();
+
 async function touchPresence(user: TokenPayload): Promise<void> {
-  await dbTouchPresence(`${user.role}:${user.sub}`, user.role);
+  const key = `${user.role}:${user.sub}`;
+  const now = Date.now();
+  const prev = lastPresenceWriteAt.get(key) || 0;
+  if (now - prev < PRESENCE_WRITE_MIN_MS) {
+    return;
+  }
+  lastPresenceWriteAt.set(key, now);
+  if (lastPresenceWriteAt.size > 2000) {
+    for (const [k, ts] of lastPresenceWriteAt.entries()) {
+      if (now - ts > 120_000) {
+        lastPresenceWriteAt.delete(k);
+      }
+    }
+  }
+  await dbTouchPresence(key, user.role);
 }
 
-// Every API request runs against a fresh snapshot of the database and writes back
-// only the documents it changed (plus queued realtime events) before responding.
+let lastMiddlewareMaintenanceAt = 0;
+const MAINTENANCE_INTERVAL_MS = 15_000;
+
+// Every API request runs against the store and writes back only changed documents
+// (plus queued realtime events) before responding.
 app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
   if (req.path === '/health' && req.method === 'GET') {
     next();
@@ -113,23 +133,32 @@ app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
       return originalSend(body);
     }
     flushed = true;
+    if (!ctx.dirty && ctx.events.length === 0) {
+      return originalSend(body);
+    }
     store
       .flush(ctx)
       .then(() => originalSend(body))
       .catch((err) => {
         console.error('Gagal menyimpan perubahan CBT ke database:', err);
-        res.status(500);
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        originalSend(JSON.stringify({ error: 'Perubahan gagal disimpan ke database. Silakan coba lagi.' }));
+        if (!res.headersSent) {
+          res.status(500);
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          originalSend(JSON.stringify({ error: 'Perubahan gagal disimpan ke database. Silakan coba lagi.' }));
+        }
       });
     return res;
   }) as Response['send'];
 
   store.run(ctx, () => {
-    try {
-      runMaintenance();
-    } catch (err) {
-      console.error('Maintenance tick gagal:', err);
+    const now = Date.now();
+    if (now - lastMiddlewareMaintenanceAt >= MAINTENANCE_INTERVAL_MS) {
+      lastMiddlewareMaintenanceAt = now;
+      try {
+        runMaintenance();
+      } catch (err) {
+        console.error('Maintenance tick gagal:', err);
+      }
     }
     next();
   });
@@ -2920,6 +2949,7 @@ app.post('/api/admin/server/restore', requireAuth, requireAdmin, (req, res) => {
 function runMaintenance(): void {
   const db = store.getDb();
   const now = Date.now();
+  let changed = false;
 
   if (db.settings.autoRotateToken) {
     const intervalMs = Math.max(5, db.settings.tokenIntervalMinutes) * 60 * 1000;
@@ -2927,6 +2957,7 @@ function runMaintenance(): void {
       if (exam.isActive && now - new Date(exam.tokenUpdatedAt).getTime() >= intervalMs) {
         exam.token = generateTokenCode();
         exam.tokenUpdatedAt = new Date(now).toISOString();
+        changed = true;
         sendToAdmins('token:rotated', {
           examId: exam.id,
           token: exam.token,
@@ -2944,12 +2975,12 @@ function runMaintenance(): void {
       s.finishedAt = new Date(now).toISOString();
       s.isOnline = false;
       calculateSessionScore(s, bank);
+      changed = true;
       sendToStudent(s.studentId, 'admin:command', { action: 'FORCE_FINISH', sessionId: s.id });
       sendToAdmins('session:updated', s);
       sendToAdmins('sync:results', { sessionId: s.id, examId: s.examId });
     }
   }
-
 
   for (const s of db.sessions) {
     if (
@@ -2958,8 +2989,13 @@ function runMaintenance(): void {
       (!s.lastHeartbeatAt || now - new Date(s.lastHeartbeatAt).getTime() > ONLINE_TIMEOUT_MS)
     ) {
       s.isOnline = false;
+      changed = true;
       sendToAdmins('session:updated', s);
     }
+  }
+
+  if (changed) {
+    store.commit();
   }
 }
 
@@ -3005,6 +3041,8 @@ app.get('/api/events', requireAuth, async (req: AuthenticatedRequest, res) => {
   }
 });
 
+const lastHeartbeatEmitAt = new Map<string, number>();
+
 app.post('/api/events', requireAuth, (req: AuthenticatedRequest, res) => {
   const user = req.user!;
   const event = typeof req.body?.event === 'string' ? req.body.event : '';
@@ -3016,12 +3054,26 @@ app.post('/api/events', requireAuth, (req: AuthenticatedRequest, res) => {
     const db = store.getDb();
     const sess = db.sessions.find((s) => s.id === sessionId && s.studentId === user.sub);
     if (sess) {
+      const now = Date.now();
+      const wasOffline = !sess.isOnline;
+      const questionChanged =
+        typeof currentIdx === 'number' && currentIdx >= 0 && currentIdx !== sess.currentQuestionIndex;
+      const prevHeartbeatMs = sess.lastHeartbeatAt ? new Date(sess.lastHeartbeatAt).getTime() : 0;
+      const prevEmitMs = lastHeartbeatEmitAt.get(sess.id) || 0;
+
       sess.isOnline = true;
-      sess.lastHeartbeatAt = new Date().toISOString();
+      sess.lastHeartbeatAt = new Date(now).toISOString();
       if (typeof currentIdx === 'number' && currentIdx >= 0) {
         sess.currentQuestionIndex = currentIdx;
       }
-      sendToAdmins('session:updated', sess);
+
+      if (wasOffline || questionChanged || now - prevHeartbeatMs >= 12_000) {
+        store.commit();
+      }
+      if (wasOffline || questionChanged || now - prevEmitMs >= 20_000) {
+        lastHeartbeatEmitAt.set(sess.id, now);
+        sendToAdmins('session:updated', sess);
+      }
     }
   }
   res.json({ ok: true });

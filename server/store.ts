@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   dbFlushChanges,
+  dbGetDocsVersion,
   dbLoadDocsAndPresence,
   dbLoadPresence,
   dbPurgeOldEvents,
@@ -784,14 +785,15 @@ interface CachedStoreState {
   snapshot: Map<string, SnapshotEntry>;
   presence: { students: number; staff: number };
   sizeBytes: number;
+  version: number;
   loadedAt: number;
   presenceLoadedAt: number;
 }
 
 const contextStorage = new AsyncLocalStorage<StoreContext>();
 const USE_IN_PROCESS_CACHE = process.env.VERCEL !== '1';
-const PG_CACHE_TTL_MS = 2000;
-const PRESENCE_REFRESH_MS = 4000;
+const PG_CACHE_TTL_MS = 3000;
+const PRESENCE_REFRESH_MS = 8000;
 
 function docKey(collection: string, id: string): string {
   return `${collection}\u0000${id}`;
@@ -942,7 +944,7 @@ class StoreManager {
     if (this.pendingFlushes > 0) {
       await this.flushChain;
     }
-    const { docs, presence } = await dbLoadDocsAndPresence();
+    const { docs, presence, version } = await dbLoadDocsAndPresence();
     const built = buildStateFromDocs(docs, presence);
     const now = Date.now();
     const state: CachedStoreState = {
@@ -950,6 +952,7 @@ class StoreManager {
       snapshot: built.snapshot,
       presence,
       sizeBytes: built.sizeBytes,
+      version,
       loadedAt: now,
       presenceLoadedAt: now,
     };
@@ -966,6 +969,25 @@ class StoreManager {
     }
     this.cache = state;
     return state;
+  }
+
+  private async ensureCacheUpToDate(): Promise<CachedStoreState> {
+    const now = Date.now();
+    if (!this.cache) {
+      return this.loadFreshIntoCache();
+    }
+    if (
+      isUsingPostgres &&
+      this.pendingFlushes === 0 &&
+      now - this.cache.loadedAt > PG_CACHE_TTL_MS
+    ) {
+      const remoteVersion = await dbGetDocsVersion();
+      if (remoteVersion !== this.cache.version) {
+        return this.loadFreshIntoCache();
+      }
+      this.cache.loadedAt = Date.now();
+    }
+    return this.cache;
   }
 
   private refreshPresenceAsync(state: CachedStoreState): void {
@@ -985,13 +1007,13 @@ class StoreManager {
   async load(): Promise<StoreContext> {
     if (USE_IN_PROCESS_CACHE) {
       const now = Date.now();
-      const cacheStale =
+      const needsCheck =
         !this.cache ||
         (isUsingPostgres && this.pendingFlushes === 0 && now - this.cache.loadedAt > PG_CACHE_TTL_MS);
 
-      if (cacheStale) {
+      if (needsCheck) {
         if (!this.loadPromise) {
-          this.loadPromise = this.loadFreshIntoCache().finally(() => {
+          this.loadPromise = this.ensureCacheUpToDate().finally(() => {
             this.loadPromise = null;
           });
         }
@@ -1081,8 +1103,9 @@ class StoreManager {
       return;
     }
 
+    let nextVersion: number | null = null;
     try {
-      await dbFlushChanges(upserts, deletes, events);
+      nextVersion = await dbFlushChanges(upserts, deletes, events);
     } catch (err) {
       ctx.events.unshift(...events);
       throw err;
@@ -1095,6 +1118,9 @@ class StoreManager {
       cacheTarget.snapshot = nextSnapshot;
       cacheTarget.sizeBytes = totalBytes;
       cacheTarget.loadedAt = Date.now();
+      if (nextVersion !== null) {
+        cacheTarget.version = nextVersion;
+      }
     }
 
     if (Math.random() < 0.02) {

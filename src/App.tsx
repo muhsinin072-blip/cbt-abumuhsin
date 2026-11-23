@@ -38,14 +38,16 @@ export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [publicInfo, setPublicInfo] = useState<PublicInfoResponse | null>(null);
   const [loadingInfo, setLoadingInfo] = useState(true);
+  const [startupError, setStartupError] = useState('');
 
   const loadPublicInfo = useCallback(async () => {
     try {
       const info = await apiFetch<PublicInfoResponse>('/api/public/info');
       setPublicInfo(info);
+      setStartupError('');
       applyCbtTheme(info?.settings?.themeColor);
-    } catch {
-      // fallback to default info if network error occurs
+    } catch (err) {
+      setStartupError(err instanceof Error ? err.message : '');
     } finally {
       setLoadingInfo(false);
     }
@@ -78,6 +80,8 @@ export default function App() {
     return (
       <LoginPortal
         publicInfo={publicInfo}
+        startupError={startupError}
+        onRetryConnection={() => loadPublicInfo()}
         onLoginSuccess={(loggedInUser) => setUser(loggedInUser)}
         onAdminClaimed={() => loadPublicInfo()}
       />

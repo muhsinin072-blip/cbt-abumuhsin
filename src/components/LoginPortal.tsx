@@ -23,12 +23,16 @@ const DEFAULT_PORTAL_SLIDES = [
 
 interface LoginPortalProps {
   publicInfo: PublicInfoResponse | null;
+  startupError?: string;
+  onRetryConnection?: () => void;
   onLoginSuccess: (user: AuthUser) => void;
   onAdminClaimed: () => void;
 }
 
 export const LoginPortal: React.FC<LoginPortalProps> = ({
   publicInfo,
+  startupError = '',
+  onRetryConnection,
   onLoginSuccess,
   onAdminClaimed,
 }) => {
@@ -432,12 +436,21 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
               </div>
             )}
 
-            {error && (
+            {(error || startupError) && (
               <div
                 role="alert"
-                className="mb-5 p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium"
+                className="mb-5 p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium space-y-2"
               >
-                {error}
+                <p>{error || startupError}</p>
+                {!error && startupError && onRetryConnection && (
+                  <button
+                    type="button"
+                    onClick={onRetryConnection}
+                    className="text-xs font-semibold text-red-900 underline hover:no-underline"
+                  >
+                    Coba sambungkan ulang
+                  </button>
+                )}
               </div>
             )}
 

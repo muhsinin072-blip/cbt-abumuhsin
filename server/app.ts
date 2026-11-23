@@ -19,7 +19,7 @@ import {
   store,
 } from './store.ts';
 import type { CbtDatabase, StoreContext } from './store.ts';
-import { dbGetEventsAfter, dbGetMaxEventId, dbTouchPresence } from './db.ts';
+import { classifyDbError, dbCheckHealth, dbPollEventsAfter, dbTouchPresence, isUsingPostgres } from './db.ts';
 import type {
   AdminAccount,
   AttendanceMethod,
@@ -72,7 +72,7 @@ function audiencesFor(user: TokenPayload): string[] {
   return [STAFF_AUDIENCE];
 }
 
-const PRESENCE_WRITE_MIN_MS = 15_000;
+const PRESENCE_WRITE_MIN_MS = 30_000;
 const lastPresenceWriteAt = new Map<string, number>();
 
 async function touchPresence(user: TokenPayload): Promise<void> {
@@ -95,6 +95,18 @@ async function touchPresence(user: TokenPayload): Promise<void> {
 
 let lastMiddlewareMaintenanceAt = 0;
 const MAINTENANCE_INTERVAL_MS = 15_000;
+const lastDbWarnByCode = new Map<string, number>();
+
+function reportDbUnavailable(context: string, err: unknown) {
+  const info = classifyDbError(err);
+  const now = Date.now();
+  const prev = lastDbWarnByCode.get(info.code) || 0;
+  if (now - prev >= 60_000) {
+    lastDbWarnByCode.set(info.code, now);
+    console.warn(`[CBT DB] ${context}: ${info.logSummary}`);
+  }
+  return info;
+}
 
 // Every API request runs against the store and writes back only changed documents
 // (plus queued realtime events) before responding.
@@ -107,8 +119,8 @@ app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
   try {
     await initSigningSecret();
   } catch (err) {
-    console.error('Gagal memuat signing secret:', err);
-    res.status(503).json({ error: 'Database CBT tidak dapat dihubungi. Coba beberapa saat lagi.' });
+    const info = reportDbUnavailable('initSigningSecret', err);
+    res.status(503).json({ error: info.userMessage, code: info.code, retryable: info.retryable });
     return;
   }
 
@@ -121,8 +133,8 @@ app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
   try {
     ctx = await store.load();
   } catch (err) {
-    console.error('Gagal memuat data CBT dari database:', err);
-    res.status(503).json({ error: 'Database CBT tidak dapat dihubungi. Coba beberapa saat lagi.' });
+    const info = reportDbUnavailable('store.load', err);
+    res.status(503).json({ error: info.userMessage, code: info.code, retryable: info.retryable });
     return;
   }
 
@@ -140,11 +152,13 @@ app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
       .flush(ctx)
       .then(() => originalSend(body))
       .catch((err) => {
-        console.error('Gagal menyimpan perubahan CBT ke database:', err);
+        const info = reportDbUnavailable('store.flush', err);
         if (!res.headersSent) {
-          res.status(500);
+          res.status(info.retryable ? 500 : 503);
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          originalSend(JSON.stringify({ error: 'Perubahan gagal disimpan ke database. Silakan coba lagi.' }));
+          originalSend(
+            JSON.stringify({ error: info.retryable ? 'Perubahan gagal disimpan ke database. Silakan coba lagi.' : info.userMessage, code: info.code, retryable: info.retryable })
+          );
         }
       });
     return res;
@@ -370,8 +384,14 @@ function buildServerMetrics(): ServerMetrics {
 
 // ---------- PUBLIC & AUTH ROUTES ----------
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, serverTime: new Date().toISOString() });
+app.get('/api/health', async (_req, res) => {
+  const dbStatus = await dbCheckHealth();
+  res.status(dbStatus.ok ? 200 : 503).json({
+    ok: dbStatus.ok,
+    database: isUsingPostgres ? 'postgresql' : 'sqlite-fallback',
+    dbStatus,
+    serverTime: new Date().toISOString(),
+  });
 });
 
 app.get('/api/public/info', (_req, res) => {
@@ -3017,27 +3037,14 @@ app.get('/api/events', requireAuth, async (req: AuthenticatedRequest, res) => {
       await store.flush(ctx);
     }
 
-    if (!Number.isFinite(afterRaw) || afterRaw < 0) {
-      const maxId = await dbGetMaxEventId();
-      res.json({ cursor: maxId, events: [] });
-      return;
-    }
-
-    const rows = await dbGetEventsAfter(afterRaw, audiences);
-    let cursor = afterRaw;
-    if (rows.length > 0) {
-      cursor = rows[rows.length - 1].id;
-    } else {
-      const maxId = await dbGetMaxEventId();
-      cursor = Math.max(afterRaw, maxId);
-    }
+    const { cursor, events } = await dbPollEventsAfter(afterRaw, audiences);
     res.json({
       cursor,
-      events: rows.map((r) => ({ event: r.event, payload: r.payload })),
+      events: events.map((r) => ({ event: r.event, payload: r.payload })),
     });
   } catch (err) {
-    console.error('Gagal mengambil event realtime:', err);
-    res.status(503).json({ error: 'Koneksi realtime terputus.' });
+    const info = reportDbUnavailable('api/events', err);
+    res.status(503).json({ error: info.retryable ? 'Koneksi realtime terputus.' : info.userMessage, code: info.code, retryable: info.retryable });
   }
 });
 

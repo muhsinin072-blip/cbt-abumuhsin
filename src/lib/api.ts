@@ -58,7 +58,8 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
         const data = await res.json();
         if (!res.ok) {
           const errMsg = data?.error || `Terjadi kesalahan server (${res.status})`;
-          if (attempt < maxAttempts - 1 && TRANSIENT_HTTP_STATUS.has(res.status)) {
+          const shouldRetry = data?.retryable !== false && TRANSIENT_HTTP_STATUS.has(res.status);
+          if (attempt < maxAttempts - 1 && shouldRetry) {
             lastError = new Error(errMsg);
             await delayMs(250 * (attempt + 1) + Math.floor(Math.random() * 200));
             continue;
@@ -97,8 +98,8 @@ interface RealtimeListener {
   onStatusChange?: (connected: boolean) => void;
 }
 
-const POLL_INTERVAL_MS = 4500;
-const POLL_ERROR_BACKOFF_MS = 7000;
+const POLL_INTERVAL_MS = 8000;
+const POLL_ERROR_BACKOFF_MS = 10000;
 const realtimeListeners = new Set<RealtimeListener>();
 let realtimeCursor: number | null = null;
 let realtimeToken = '';

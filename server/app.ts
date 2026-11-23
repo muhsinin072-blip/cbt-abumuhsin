@@ -20,7 +20,7 @@ import {
   store,
 } from './store.ts';
 import type { CbtDatabase, StoreContext } from './store.ts';
-import { classifyDbError, dbCheckHealth, dbPollEventsAfter, dbTouchPresence, isUsingPostgres } from './db.ts';
+import { classifyDbError, dbCheckHealth, dbPollEventsAfter, dbTouchPresence, getIsUsingPostgres } from './db.ts';
 import type {
   AdminAccount,
   AttendanceMethod,
@@ -397,7 +397,11 @@ app.get('/api/health', async (_req, res) => {
   const dbStatus = await dbCheckHealth();
   res.status(dbStatus.ok ? 200 : 503).json({
     ok: dbStatus.ok,
-    database: isUsingPostgres ? 'postgresql' : 'sqlite-fallback',
+    database: getIsUsingPostgres()
+      ? 'postgresql'
+      : dbStatus.failoverFromPostgres
+        ? 'sqlite-failover'
+        : 'sqlite-fallback',
     dbStatus,
     serverTime: new Date().toISOString(),
   });

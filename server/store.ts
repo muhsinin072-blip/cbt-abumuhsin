@@ -8,7 +8,8 @@ import {
   dbLoadDocsAndPresence,
   dbLoadPresence,
   dbPurgeOldEvents,
-  isUsingPostgres,
+  getIsUsingPostgres,
+  onDbEngineFailover,
 } from './db.ts';
 import { hashPassword } from './auth.ts';
 import type {
@@ -940,6 +941,12 @@ class StoreManager {
   private pendingFlushes = 0;
   private presenceRefreshing = false;
 
+  constructor() {
+    onDbEngineFailover(() => {
+      this.cache = null;
+    });
+  }
+
   private async loadFreshIntoCache(): Promise<CachedStoreState> {
     if (this.pendingFlushes > 0) {
       await this.flushChain;
@@ -977,7 +984,7 @@ class StoreManager {
       return this.loadFreshIntoCache();
     }
     if (
-      isUsingPostgres &&
+      getIsUsingPostgres() &&
       this.pendingFlushes === 0 &&
       now - this.cache.loadedAt > PG_CACHE_TTL_MS
     ) {
@@ -1009,7 +1016,7 @@ class StoreManager {
       const now = Date.now();
       const needsCheck =
         !this.cache ||
-        (isUsingPostgres && this.pendingFlushes === 0 && now - this.cache.loadedAt > PG_CACHE_TTL_MS);
+        (getIsUsingPostgres() && this.pendingFlushes === 0 && now - this.cache.loadedAt > PG_CACHE_TTL_MS);
 
       if (needsCheck) {
         if (!this.loadPromise) {

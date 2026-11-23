@@ -148,6 +148,21 @@ function resolvePostgresConfig(): pg.PoolConfig | null {
 const pgConfig = resolvePostgresConfig();
 export const isUsingPostgres = Boolean(pgConfig);
 const usePostgres = isUsingPostgres;
+const CAN_FAILOVER_TO_LOCAL = process.env.VERCEL !== '1';
+let pgFailedOver = false;
+let pgFailoverReason = '';
+const failoverListeners = new Set<() => void>();
+
+export function onDbEngineFailover(listener: () => void): () => void {
+  failoverListeners.add(listener);
+  return () => {
+    failoverListeners.delete(listener);
+  };
+}
+
+export function getIsUsingPostgres(): boolean {
+  return usePostgres && Boolean(pgPool) && !pgFailedOver;
+}
 
 declare global {
   var __candyCbtPgPool: pg.Pool | undefined;
@@ -342,26 +357,62 @@ export function classifyDbError(err: unknown): DbErrorClassification {
   };
 }
 
-export async function dbCheckHealth(): Promise<{ ok: boolean; engine: 'postgresql' | 'sqlite'; code?: string; message?: string }> {
-  if (usePostgres && pgPool) {
+function shouldFailoverPgError(err: unknown): boolean {
+  if (!CAN_FAILOVER_TO_LOCAL) return false;
+  return classifyDbError(err).code === 'DB_QUOTA_EXCEEDED';
+}
+
+function activatePgFailover(err: unknown): void {
+  if (pgFailedOver || !CAN_FAILOVER_TO_LOCAL) return;
+  const info = classifyDbError(err);
+  pgFailedOver = true;
+  pgFailoverReason = info.logSummary;
+  console.warn(
+    `[CBT DB] Kuota PostgreSQL/Neon pada DATABASE_URL terlampaui (${info.code}); mengaktifkan failover database lokal SQLite agar login dan ujian tetap berjalan.`
+  );
+  for (const listener of failoverListeners) {
+    try {
+      listener();
+    } catch {
+      // ignore listener error
+    }
+  }
+}
+
+export async function dbCheckHealth(): Promise<{
+  ok: boolean;
+  engine: 'postgresql' | 'sqlite';
+  code?: string;
+  message?: string;
+  failoverFromPostgres?: boolean;
+}> {
+  if (getIsUsingPostgres() && pgPool) {
     try {
       await ensurePgSchema();
       await pgPool.query('SELECT 1');
       return { ok: true, engine: 'postgresql' };
     } catch (err) {
-      const e = err as { code?: string; message?: string };
-      return {
-        ok: false,
-        engine: 'postgresql',
-        code: e?.code,
-        message: (e?.message || String(err)).replace(/postgres(?:ql)?:\/\/\S+/gi, '[redacted]'),
-      };
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        const e = err as { code?: string; message?: string };
+        return {
+          ok: false,
+          engine: 'postgresql',
+          code: e?.code,
+          message: (e?.message || String(err)).replace(/postgres(?:ql)?:\/\/\S+/gi, '[redacted]'),
+        };
+      }
     }
   }
   try {
     const db = await getSqliteDb();
     db.prepare('SELECT 1').get();
-    return { ok: true, engine: 'sqlite' };
+    return {
+      ok: true,
+      engine: 'sqlite',
+      ...(pgFailedOver ? { failoverFromPostgres: true, message: pgFailoverReason } : {}),
+    };
   } catch (err) {
     const e = err as { code?: string; message?: string };
     return { ok: false, engine: 'sqlite', code: e?.code, message: e?.message || String(err) };
@@ -579,31 +630,39 @@ async function readLegacySqliteSnapshot(): Promise<{
 }
 
 export async function dbInitSessionSecret(candidate: string): Promise<string> {
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const existing = await pgPool!.query<{ value: string }>(
-        `SELECT value FROM cbt_meta WHERE key = 'session_secret'`
-      );
-      if (existing.rows[0]?.value) {
-        return existing.rows[0].value;
-      }
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const existing = await pgPool!.query<{ value: string }>(
+          `SELECT value FROM cbt_meta WHERE key = 'session_secret'`
+        );
+        if (existing.rows[0]?.value) {
+          return existing.rows[0].value;
+        }
 
-      let initialSecret = candidate;
-      const legacy = await readLegacySqliteSnapshot();
-      if (legacy?.sessionSecret && legacy.sessionSecret.length >= 16) {
-        initialSecret = legacy.sessionSecret;
-      }
+        let initialSecret = candidate;
+        const legacy = await readLegacySqliteSnapshot();
+        if (legacy?.sessionSecret && legacy.sessionSecret.length >= 16) {
+          initialSecret = legacy.sessionSecret;
+        }
 
-      await pgPool!.query(
-        `INSERT INTO cbt_meta (key, value) VALUES ('session_secret', $1) ON CONFLICT (key) DO NOTHING`,
-        [initialSecret]
-      );
-      const { rows } = await pgPool!.query<{ value: string }>(
-        `SELECT value FROM cbt_meta WHERE key = 'session_secret'`
-      );
-      return rows[0]?.value || initialSecret;
-    });
+        await pgPool!.query(
+          `INSERT INTO cbt_meta (key, value) VALUES ('session_secret', $1) ON CONFLICT (key) DO NOTHING`,
+          [initialSecret]
+        );
+        const { rows } = await pgPool!.query<{ value: string }>(
+          `SELECT value FROM cbt_meta WHERE key = 'session_secret'`
+        );
+        return rows[0]?.value || initialSecret;
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
+      }
+    }
   }
 
   return withSqliteRetry((db) => {
@@ -616,16 +675,24 @@ export async function dbInitSessionSecret(candidate: string): Promise<string> {
 }
 
 export async function dbTouchPresence(userId: string, role: string): Promise<void> {
-  if (usePostgres && pgPool) {
-    await withPgRetry(async () => {
-      await ensurePgSchema();
-      await pgPool!.query(
-        `INSERT INTO cbt_presence (user_id, role, seen_at) VALUES ($1, $2, now())
-         ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, seen_at = now()`,
-        [userId, role]
-      );
-    });
-    return;
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      await withPgRetry(async () => {
+        await ensurePgSchema();
+        await pgPool!.query(
+          `INSERT INTO cbt_presence (user_id, role, seen_at) VALUES ($1, $2, now())
+           ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, seen_at = now()`,
+          [userId, role]
+        );
+      });
+      return;
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
+      }
+    }
   }
 
   await withSqliteRetry((db) => {
@@ -637,32 +704,48 @@ export async function dbTouchPresence(userId: string, role: string): Promise<voi
 }
 
 export async function dbGetDocsVersion(): Promise<number> {
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const { rows } = await pgPool!.query<{ value: string }>(
-        `SELECT value FROM cbt_meta WHERE key = 'docs_version'`
-      );
-      return Number(rows[0]?.value || 0);
-    });
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const { rows } = await pgPool!.query<{ value: string }>(
+          `SELECT value FROM cbt_meta WHERE key = 'docs_version'`
+        );
+        return Number(rows[0]?.value || 0);
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
+      }
+    }
   }
   return 0;
 }
 
 export async function dbLoadPresence(): Promise<{ students: number; staff: number }> {
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const { rows } = await pgPool!.query<{ role: string; n: number }>(
-        `SELECT role, count(*)::int AS n FROM cbt_presence WHERE seen_at > now() - interval '75 seconds' GROUP BY role`
-      );
-      const presence = { students: 0, staff: 0 };
-      for (const row of rows) {
-        if (row.role === 'student') presence.students += row.n;
-        else presence.staff += row.n;
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const { rows } = await pgPool!.query<{ role: string; n: number }>(
+          `SELECT role, count(*)::int AS n FROM cbt_presence WHERE seen_at > now() - interval '75 seconds' GROUP BY role`
+        );
+        const presence = { students: 0, staff: 0 };
+        for (const row of rows) {
+          if (row.role === 'student') presence.students += row.n;
+          else presence.staff += row.n;
+        }
+        return presence;
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
       }
-      return presence;
-    });
+    }
   }
 
   return withSqliteRetry((db) => {
@@ -685,52 +768,60 @@ export async function dbLoadDocsAndPresence(): Promise<{
   presence: { students: number; staff: number };
   version: number;
 }> {
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const [docsRes, presenceRes, versionRes] = await Promise.all([
-        pgPool!.query<StoredDocRow>(
-          'SELECT collection, id, pos, data FROM cbt_docs ORDER BY collection, pos, id'
-        ),
-        pgPool!.query<{ role: string; n: number }>(
-          `SELECT role, count(*)::int AS n FROM cbt_presence WHERE seen_at > now() - interval '75 seconds' GROUP BY role`
-        ),
-        pgPool!.query<{ value: string }>(
-          `SELECT value FROM cbt_meta WHERE key = 'docs_version'`
-        ),
-      ]);
-      const presence = { students: 0, staff: 0 };
-      for (const row of presenceRes.rows) {
-        if (row.role === 'student') presence.students += row.n;
-        else presence.staff += row.n;
-      }
-      let version = Number(versionRes.rows[0]?.value || 0);
-
-      if (docsRes.rows.length === 0) {
-        const legacy = await readLegacySqliteSnapshot();
-        if (legacy && legacy.docs.length > 0) {
-          await pgPool!.query(
-            `INSERT INTO cbt_docs (collection, id, pos, data)
-             SELECT x.collection, x.id, x.pos, x.data
-             FROM jsonb_to_recordset($1::jsonb) AS x(collection text, id text, pos double precision, data jsonb)
-             ON CONFLICT (collection, id) DO NOTHING`,
-            [JSON.stringify(legacy.docs)]
-          );
-          const vBump = await pgPool!.query<{ value: string }>(
-            `INSERT INTO cbt_meta (key, value) VALUES ('docs_version', '1')
-             ON CONFLICT (key) DO UPDATE SET value = ((cbt_meta.value::bigint) + 1)::text
-             RETURNING value`
-          );
-          version = Number(vBump.rows[0]?.value || 1);
-          const migratedRes = await pgPool!.query<StoredDocRow>(
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const [docsRes, presenceRes, versionRes] = await Promise.all([
+          pgPool!.query<StoredDocRow>(
             'SELECT collection, id, pos, data FROM cbt_docs ORDER BY collection, pos, id'
-          );
-          return { docs: migratedRes.rows, presence, version };
+          ),
+          pgPool!.query<{ role: string; n: number }>(
+            `SELECT role, count(*)::int AS n FROM cbt_presence WHERE seen_at > now() - interval '75 seconds' GROUP BY role`
+          ),
+          pgPool!.query<{ value: string }>(
+            `SELECT value FROM cbt_meta WHERE key = 'docs_version'`
+          ),
+        ]);
+        const presence = { students: 0, staff: 0 };
+        for (const row of presenceRes.rows) {
+          if (row.role === 'student') presence.students += row.n;
+          else presence.staff += row.n;
         }
-      }
+        let version = Number(versionRes.rows[0]?.value || 0);
 
-      return { docs: docsRes.rows, presence, version };
-    });
+        if (docsRes.rows.length === 0) {
+          const legacy = await readLegacySqliteSnapshot();
+          if (legacy && legacy.docs.length > 0) {
+            await pgPool!.query(
+              `INSERT INTO cbt_docs (collection, id, pos, data)
+               SELECT x.collection, x.id, x.pos, x.data
+               FROM jsonb_to_recordset($1::jsonb) AS x(collection text, id text, pos double precision, data jsonb)
+               ON CONFLICT (collection, id) DO NOTHING`,
+              [JSON.stringify(legacy.docs)]
+            );
+            const vBump = await pgPool!.query<{ value: string }>(
+              `INSERT INTO cbt_meta (key, value) VALUES ('docs_version', '1')
+               ON CONFLICT (key) DO UPDATE SET value = ((cbt_meta.value::bigint) + 1)::text
+               RETURNING value`
+            );
+            version = Number(vBump.rows[0]?.value || 1);
+            const migratedRes = await pgPool!.query<StoredDocRow>(
+              'SELECT collection, id, pos, data FROM cbt_docs ORDER BY collection, pos, id'
+            );
+            return { docs: migratedRes.rows, presence, version };
+          }
+        }
+
+        return { docs: docsRes.rows, presence, version };
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
+      }
+    }
   }
 
   return withSqliteRetry((db) => {
@@ -771,56 +862,64 @@ export async function dbFlushChanges(
   deletes: { collection: string; id: string }[],
   events: PendingEventWrite[]
 ): Promise<number | null> {
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const client = await pgPool!.connect();
-      try {
-        await client.query('BEGIN');
-        if (upserts.length > 0) {
-          await client.query(
-            `INSERT INTO cbt_docs (collection, id, pos, data)
-             SELECT x.collection, x.id, x.pos, x.data
-             FROM jsonb_to_recordset($1::jsonb) AS x(collection text, id text, pos double precision, data jsonb)
-             ON CONFLICT (collection, id) DO UPDATE
-             SET pos = EXCLUDED.pos, data = EXCLUDED.data, updated_at = now()`,
-            [JSON.stringify(upserts)]
-          );
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const client = await pgPool!.connect();
+        try {
+          await client.query('BEGIN');
+          if (upserts.length > 0) {
+            await client.query(
+              `INSERT INTO cbt_docs (collection, id, pos, data)
+               SELECT x.collection, x.id, x.pos, x.data
+               FROM jsonb_to_recordset($1::jsonb) AS x(collection text, id text, pos double precision, data jsonb)
+               ON CONFLICT (collection, id) DO UPDATE
+               SET pos = EXCLUDED.pos, data = EXCLUDED.data, updated_at = now()`,
+              [JSON.stringify(upserts)]
+            );
+          }
+          if (deletes.length > 0) {
+            await client.query(
+              `DELETE FROM cbt_docs d
+               USING jsonb_to_recordset($1::jsonb) AS x(collection text, id text)
+               WHERE d.collection = x.collection AND d.id = x.id`,
+              [JSON.stringify(deletes)]
+            );
+          }
+          if (events.length > 0) {
+            await client.query(
+              `INSERT INTO cbt_events (audience, event, payload)
+               SELECT x.audience, x.event, x.payload
+               FROM jsonb_to_recordset($1::jsonb) AS x(audience text, event text, payload jsonb)`,
+              [JSON.stringify(events.map((e) => ({ ...e, payload: e.payload ?? null })))]
+            );
+          }
+          let nextVersion: number | null = null;
+          if (upserts.length > 0 || deletes.length > 0) {
+            const vRes = await client.query<{ value: string }>(
+              `INSERT INTO cbt_meta (key, value) VALUES ('docs_version', '1')
+               ON CONFLICT (key) DO UPDATE SET value = ((cbt_meta.value::bigint) + 1)::text
+               RETURNING value`
+            );
+            nextVersion = Number(vRes.rows[0]?.value || 1);
+          }
+          await client.query('COMMIT');
+          return nextVersion;
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          throw err;
+        } finally {
+          client.release();
         }
-        if (deletes.length > 0) {
-          await client.query(
-            `DELETE FROM cbt_docs d
-             USING jsonb_to_recordset($1::jsonb) AS x(collection text, id text)
-             WHERE d.collection = x.collection AND d.id = x.id`,
-            [JSON.stringify(deletes)]
-          );
-        }
-        if (events.length > 0) {
-          await client.query(
-            `INSERT INTO cbt_events (audience, event, payload)
-             SELECT x.audience, x.event, x.payload
-             FROM jsonb_to_recordset($1::jsonb) AS x(audience text, event text, payload jsonb)`,
-            [JSON.stringify(events.map((e) => ({ ...e, payload: e.payload ?? null })))]
-          );
-        }
-        let nextVersion: number | null = null;
-        if (upserts.length > 0 || deletes.length > 0) {
-          const vRes = await client.query<{ value: string }>(
-            `INSERT INTO cbt_meta (key, value) VALUES ('docs_version', '1')
-             ON CONFLICT (key) DO UPDATE SET value = ((cbt_meta.value::bigint) + 1)::text
-             RETURNING value`
-          );
-          nextVersion = Number(vRes.rows[0]?.value || 1);
-        }
-        await client.query('COMMIT');
-        return nextVersion;
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
         throw err;
-      } finally {
-        client.release();
       }
-    });
+    }
   }
 
   await withSqliteRetry((db) => {
@@ -861,7 +960,7 @@ export async function dbFlushChanges(
 }
 
 export function dbPurgeOldEvents(): void {
-  if (usePostgres && pgPool) {
+  if (getIsUsingPostgres() && pgPool) {
     pgPool
       .query(`DELETE FROM cbt_events WHERE created_at < now() - interval '30 minutes'`)
       .catch((err) => console.error('Gagal membersihkan cbt_events:', err));
@@ -889,12 +988,20 @@ export function dbPurgeOldEvents(): void {
 }
 
 export async function dbGetMaxEventId(): Promise<number> {
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const { rows } = await pgPool!.query<{ max: string | null }>('SELECT max(id) AS max FROM cbt_events');
-      return Number(rows[0]?.max || 0);
-    });
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const { rows } = await pgPool!.query<{ max: string | null }>('SELECT max(id) AS max FROM cbt_events');
+        return Number(rows[0]?.max || 0);
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
+      }
+    }
   }
 
   return withSqliteRetry((db) => {
@@ -926,41 +1033,49 @@ export async function dbPollEventsAfter(
     return { cursor: afterId, events: [] };
   }
 
-  if (usePostgres && pgPool) {
-    return withPgRetry(async () => {
-      await ensurePgSchema();
-      const { rows } = await pgPool!.query<{
-        max_id: string;
-        id: string | null;
-        event: string | null;
-        payload: unknown;
-      }>(
-        `WITH latest AS (SELECT COALESCE(max(id), 0) AS max_id FROM cbt_events)
-         SELECT l.max_id, e.id, e.event, e.payload
-         FROM latest l
-         LEFT JOIN LATERAL (
-           SELECT id, event, payload
-           FROM cbt_events
-           WHERE id > $1 AND audience = ANY($2::text[])
-           ORDER BY id ASC
-           LIMIT 200
-         ) e ON true
-         ORDER BY e.id ASC NULLS LAST`,
-        [afterId, audiences]
-      );
+  if (getIsUsingPostgres() && pgPool) {
+    try {
+      return await withPgRetry(async () => {
+        await ensurePgSchema();
+        const { rows } = await pgPool!.query<{
+          max_id: string;
+          id: string | null;
+          event: string | null;
+          payload: unknown;
+        }>(
+          `WITH latest AS (SELECT COALESCE(max(id), 0) AS max_id FROM cbt_events)
+           SELECT l.max_id, e.id, e.event, e.payload
+           FROM latest l
+           LEFT JOIN LATERAL (
+             SELECT id, event, payload
+             FROM cbt_events
+             WHERE id > $1 AND audience = ANY($2::text[])
+             ORDER BY id ASC
+             LIMIT 200
+           ) e ON true
+           ORDER BY e.id ASC NULLS LAST`,
+          [afterId, audiences]
+        );
 
-      let cursor = afterId;
-      const events: StoredEventRow[] = [];
-      for (const r of rows) {
-        cursor = Math.max(cursor, Number(r.max_id || 0));
-        if (r.id !== null && r.event !== null) {
-          const evId = Number(r.id);
-          cursor = Math.max(cursor, evId);
-          events.push({ id: evId, event: r.event, payload: r.payload });
+        let cursor = afterId;
+        const events: StoredEventRow[] = [];
+        for (const r of rows) {
+          cursor = Math.max(cursor, Number(r.max_id || 0));
+          if (r.id !== null && r.event !== null) {
+            const evId = Number(r.id);
+            cursor = Math.max(cursor, evId);
+            events.push({ id: evId, event: r.event, payload: r.payload });
+          }
         }
+        return { cursor, events };
+      });
+    } catch (err) {
+      if (shouldFailoverPgError(err)) {
+        activatePgFailover(err);
+      } else {
+        throw err;
       }
-      return { cursor, events };
-    });
+    }
   }
 
   return withSqliteRetry((db) => {

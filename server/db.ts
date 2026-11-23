@@ -629,6 +629,20 @@ async function readLegacySqliteSnapshot(): Promise<{
   }
 }
 
+export async function dbReadLocalSessionSecret(): Promise<string | null> {
+  const sqliteFile = findExistingLegacySqlitePath();
+  if (!sqliteFile) return null;
+  try {
+    const db = await getSqliteDb();
+    const row = db.prepare(`SELECT value FROM cbt_meta WHERE key = 'session_secret'`).get() as
+      | { value?: string }
+      | undefined;
+    return row?.value && row.value.length >= 16 ? row.value : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function dbInitSessionSecret(candidate: string): Promise<string> {
   if (getIsUsingPostgres() && pgPool) {
     try {

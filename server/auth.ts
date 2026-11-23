@@ -1,16 +1,46 @@
 import crypto from 'node:crypto';
 import type { UserRole } from '../src/types/cbt.ts';
-import { dbInitSessionSecret } from './db.ts';
+import { dbInitSessionSecret, dbReadLocalSessionSecret, getIsUsingPostgres } from './db.ts';
 
 let sharedSecret: string | null = null;
 let sharedSecretLoading: Promise<string> | null = null;
+const verificationSecrets = new Set<string>();
 
-// Serverless instances do not share memory, so the token signing secret must be
-// identical everywhere: use SESSION_SECRET when set, otherwise one stored in the database.
+function deriveRuntimeSigningSecret(): string | null {
+  const secretInputs = [
+    process.env.DATABASE_URL?.trim(),
+    process.env.POSTGRES_URL?.trim(),
+    process.env.POSTGRES_URL_NON_POOLING?.trim(),
+    process.env.ADMIN_PASSCODE?.trim(),
+    process.env.GEMINI_API_KEY?.trim(),
+  ].filter((v): v is string => Boolean(v && v.length >= 6));
+
+  if (secretInputs.length === 0) {
+    return null;
+  }
+
+  const deploymentScope = process.env.APPLET_ID?.trim() || 'candycbt';
+  return crypto
+    .createHmac('sha256', secretInputs.join('\n'))
+    .update(`candycbt-session-signing-v1:${deploymentScope}`)
+    .digest('hex');
+}
+
+function registerVerificationSecret(secret?: string | null): void {
+  if (secret && secret.length >= 16) {
+    verificationSecrets.add(secret);
+  }
+}
+
+// Serverless/multi-instance containers do not share memory, so the token signing secret
+// must match everywhere: prefer SESSION_SECRET, then PostgreSQL cbt_meta, then a key
+// derived from server-only runtime secrets (process.env) when running on local failover,
+// and finally a persisted SQLite random secret on standalone local setups.
 export function initSigningSecret(): Promise<string> {
   const envSecret = process.env.SESSION_SECRET?.trim();
   if (envSecret && envSecret.length >= 16) {
     sharedSecret = envSecret;
+    registerVerificationSecret(envSecret);
     return Promise.resolve(envSecret);
   }
   if (sharedSecret) {
@@ -18,8 +48,27 @@ export function initSigningSecret(): Promise<string> {
   }
   if (!sharedSecretLoading) {
     sharedSecretLoading = (async () => {
-      const candidate = crypto.randomBytes(32).toString('hex');
-      sharedSecret = await dbInitSessionSecret(candidate);
+      const derived = deriveRuntimeSigningSecret();
+      registerVerificationSecret(derived);
+
+      const candidate = derived || crypto.randomBytes(32).toString('hex');
+      const dbSecret = await dbInitSessionSecret(candidate);
+      registerVerificationSecret(dbSecret);
+
+      if (!getIsUsingPostgres()) {
+        const localSecret = await dbReadLocalSessionSecret();
+        registerVerificationSecret(localSecret);
+      }
+
+      // When PostgreSQL is unavailable/failed-over across multi-instance containers,
+      // prefer the deterministic runtime-derived secret so every instance verifies tokens identically,
+      // while keeping any previously stored local dbSecret in verificationSecrets for continuity.
+      if (!getIsUsingPostgres() && derived) {
+        sharedSecret = derived;
+      } else {
+        sharedSecret = dbSecret;
+      }
+      registerVerificationSecret(sharedSecret);
       return sharedSecret;
     })().catch((err) => {
       sharedSecretLoading = null;
@@ -107,6 +156,16 @@ export function refreshAuthTokenIfNeeded(payload: TokenPayload): string | null {
   });
 }
 
+function signatureMatchesSecret(encoded: string, providedSig: string, secret: string): boolean {
+  const expectedSig = crypto
+    .createHmac('sha256', secret)
+    .update(encoded)
+    .digest('base64url');
+  const sigBufA = Buffer.from(providedSig);
+  const sigBufB = Buffer.from(expectedSig);
+  return sigBufA.length === sigBufB.length && crypto.timingSafeEqual(sigBufA, sigBufB);
+}
+
 export function verifyAuthToken(token: string): TokenPayload | null {
   if (!token || !token.includes('.')) {
     return null;
@@ -119,20 +178,31 @@ export function verifyAuthToken(token: string): TokenPayload | null {
   if (!encoded || !providedSig) {
     return null;
   }
-  const expectedSig = crypto
-    .createHmac('sha256', getSigningSecret())
-    .update(encoded)
-    .digest('base64url');
 
-  const sigBufA = Buffer.from(providedSig);
-  const sigBufB = Buffer.from(expectedSig);
-  if (sigBufA.length !== sigBufB.length || !crypto.timingSafeEqual(sigBufA, sigBufB)) {
+  const primary = getSigningSecret();
+  let signatureValid = signatureMatchesSecret(encoded, providedSig, primary);
+  if (!signatureValid) {
+    for (const altSecret of verificationSecrets) {
+      if (altSecret !== primary && signatureMatchesSecret(encoded, providedSig, altSecret)) {
+        signatureValid = true;
+        break;
+      }
+    }
+  }
+  if (!signatureValid) {
     return null;
   }
 
   try {
     const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as TokenPayload;
-    if (!parsed || typeof parsed.exp !== 'number' || parsed.exp < Date.now()) {
+    if (
+      !parsed ||
+      typeof parsed.sub !== 'string' ||
+      !parsed.sub ||
+      typeof parsed.role !== 'string' ||
+      typeof parsed.exp !== 'number' ||
+      parsed.exp < Date.now()
+    ) {
       return null;
     }
     return parsed;

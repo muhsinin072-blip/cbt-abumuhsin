@@ -92,6 +92,41 @@ function handleUnauthorizedResponse(url: string, errMsg: string): void {
   }
 }
 
+let sessionVerifyPromise: Promise<'valid' | 'invalid' | 'error'> | null = null;
+
+async function confirmSessionWithServer(): Promise<'valid' | 'invalid' | 'error'> {
+  if (!memoryToken) return 'invalid';
+  if (sessionVerifyPromise) {
+    return sessionVerifyPromise;
+  }
+  const tokenChecked = memoryToken;
+  sessionVerifyPromise = (async () => {
+    try {
+      const res = await fetch('/api/auth/me', {
+        headers: {
+          Authorization: `Bearer ${tokenChecked}`,
+        },
+      });
+      const refreshed = res.headers.get('x-refreshed-token');
+      if (refreshed && memoryToken === tokenChecked) {
+        setAuthToken(refreshed);
+      }
+      if (res.ok) {
+        return 'valid';
+      }
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        return 'invalid';
+      }
+      return 'error';
+    } catch {
+      return 'error';
+    } finally {
+      sessionVerifyPromise = null;
+    }
+  })();
+  return sessionVerifyPromise;
+}
+
 function delayMs(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -99,6 +134,7 @@ function delayMs(ms: number): Promise<void> {
 export async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const maxAttempts = 3;
   let lastError: Error | null = null;
+  let verifiedSessionAfter401 = false;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const headers = new Headers(options.headers || {});
@@ -126,7 +162,24 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
         if (!res.ok) {
           const errMsg = data?.error || `Terjadi kesalahan server (${res.status})`;
           if (res.status === 401) {
-            handleUnauthorizedResponse(url, errMsg);
+            if (!isLoginEndpoint(url) && memoryToken) {
+              if (url === '/api/auth/me') {
+                handleUnauthorizedResponse(url, errMsg);
+                throw new Error(errMsg);
+              }
+              if (!verifiedSessionAfter401) {
+                verifiedSessionAfter401 = true;
+                const check = await confirmSessionWithServer();
+                if (check === 'valid' && attempt < maxAttempts - 1) {
+                  await delayMs(150);
+                  continue;
+                }
+                if (check === 'invalid') {
+                  handleUnauthorizedResponse(url, errMsg);
+                }
+                throw new Error(errMsg);
+              }
+            }
             throw new Error(errMsg);
           }
           const shouldRetry = data?.retryable !== false && TRANSIENT_HTTP_STATUS.has(res.status);
@@ -143,7 +196,24 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
       if (!res.ok) {
         const errMsg = `Permintaan gagal (${res.status})`;
         if (res.status === 401) {
-          handleUnauthorizedResponse(url, 'Sesi tidak valid atau telah kedaluwarsa. Silakan login kembali.');
+          const sessionMsg = 'Sesi tidak valid atau telah kedaluwarsa. Silakan login kembali.';
+          if (!isLoginEndpoint(url) && memoryToken) {
+            if (url === '/api/auth/me') {
+              handleUnauthorizedResponse(url, sessionMsg);
+              throw new Error(sessionMsg);
+            }
+            if (!verifiedSessionAfter401) {
+              verifiedSessionAfter401 = true;
+              const check = await confirmSessionWithServer();
+              if (check === 'valid' && attempt < maxAttempts - 1) {
+                await delayMs(150);
+                continue;
+              }
+              if (check === 'invalid') {
+                handleUnauthorizedResponse(url, sessionMsg);
+              }
+            }
+          }
           throw new Error(errMsg);
         }
         if (attempt < maxAttempts - 1 && TRANSIENT_HTTP_STATUS.has(res.status)) {

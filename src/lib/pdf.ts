@@ -294,33 +294,78 @@ export function generateBeritaAcaraPDF(
   doc.save(`Berita_Acara_${exam.subject.replace(/[^a-zA-Z0-9]+/g, '_')}.pdf`);
 }
 
+export interface ParticipantCardsPdfOptions {
+  className?: string;
+  groupByClass?: boolean;
+}
+
+function toSafePdfSlug(value: string): string {
+  return (
+    value
+      .trim()
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'Semua'
+  );
+}
+
+function drawParticipantPageClassHeader(
+  doc: jsPDF,
+  classLabel: string,
+  studentCount: number,
+  pageInClass: number,
+  totalPagesInClass: number,
+  settings: SchoolSettings
+): void {
+  const [r, g, b] = getThemePdfRgb(settings.themeColor);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setTextColor(r, g, b);
+  doc.text(`KELAS: ${classLabel.toUpperCase()} (${studentCount} Peserta)`, 14, 8.2);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text(
+    `${settings.schoolName} · Hal ${pageInClass}/${totalPagesInClass}`,
+    196,
+    8.2,
+    { align: 'right' }
+  );
+
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.25);
+  doc.line(14, 9.8, 196, 9.8);
+}
+
 export async function generateParticipantCardsPDF(
   students: Student[],
-  settings: SchoolSettings
+  settings: SchoolSettings,
+  options?: ParticipantCardsPdfOptions
 ): Promise<void> {
+  if (students.length === 0) return;
+
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const cardWidth = 86;
   const cardHeight = 52;
   const marginX = 14;
-  const marginY = 10;
+  const marginY = 12;
   const gapX = 10;
-  const gapY = 4;
+  const gapY = 3.5;
 
-  const qrDataUrls = await Promise.all(
-    students.map((stu) =>
-      QRCode.toDataURL(`CANDYCBT|STU|${stu.nis}`, {
+  const uniqueNis = Array.from(new Set(students.map((s) => s.nis)));
+  const qrEntries = await Promise.all(
+    uniqueNis.map(async (nisCode) => {
+      const dataUrl = await QRCode.toDataURL(`CANDYCBT|STU|${nisCode}`, {
         width: 160,
         margin: 1,
         color: { dark: '#0f172a', light: '#ffffff' },
-      })
-    )
+      });
+      return [nisCode, dataUrl] as const;
+    })
   );
+  const qrByNis = new Map<string, string>(qrEntries);
 
-  students.forEach((stu, idx) => {
-    const posOnPage = idx % 10;
-    if (idx > 0 && posOnPage === 0) {
-      doc.addPage();
-    }
+  const renderCard = (stu: Student, posOnPage: number) => {
     const col = posOnPage % 2;
     const row = Math.floor(posOnPage / 2);
     const x = marginX + col * (cardWidth + gapX);
@@ -365,7 +410,7 @@ export async function generateParticipantCardsPDF(
       doc.text(`: ${val}`, x + 16.5, ry);
     });
 
-    const qrImg = qrDataUrls[idx];
+    const qrImg = qrByNis.get(stu.nis);
     if (qrImg) {
       doc.addImage(qrImg, 'PNG', x + cardWidth - 25, y + 11.3, 21, 21);
       doc.setFont('helvetica', 'normal');
@@ -423,9 +468,89 @@ export async function generateParticipantCardsPDF(
       doc.setTextColor(71, 85, 105);
       doc.text(`NIP. ${settings.principalNip.trim()}`, sigCenterX, y + 50.6, { align: 'center' });
     }
+  };
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (options?.groupByClass) {
+    const grouped = new Map<string, Student[]>();
+    students.forEach((stu) => {
+      const cls = stu.className?.trim() || 'Tanpa Kelas';
+      const list = grouped.get(cls);
+      if (list) {
+        list.push(stu);
+      } else {
+        grouped.set(cls, [stu]);
+      }
+    });
+
+    const sortedClasses = Array.from(grouped.keys()).sort((a, b) =>
+      a.localeCompare(b, 'id', { numeric: true, sensitivity: 'base' })
+    );
+
+    sortedClasses.forEach((cls, groupIdx) => {
+      if (groupIdx > 0) {
+        doc.addPage();
+      }
+      const classStudents = [...(grouped.get(cls) || [])].sort((a, b) =>
+        a.name.localeCompare(b.name, 'id', { sensitivity: 'base' })
+      );
+      const totalPagesInClass = Math.max(1, Math.ceil(classStudents.length / 10));
+
+      classStudents.forEach((stu, idx) => {
+        const posOnPage = idx % 10;
+        if (idx > 0 && posOnPage === 0) {
+          doc.addPage();
+        }
+        if (posOnPage === 0) {
+          const pageInClass = Math.floor(idx / 10) + 1;
+          drawParticipantPageClassHeader(
+            doc,
+            cls,
+            classStudents.length,
+            pageInClass,
+            totalPagesInClass,
+            settings
+          );
+        }
+        renderCard(stu, posOnPage);
+      });
+    });
+
+    doc.save(`Kartu_Peserta_Per_Kelas_${today}.pdf`);
+    return;
+  }
+
+  const singleClassLabel = options?.className?.trim();
+  const orderedStudents = singleClassLabel
+    ? [...students].sort((a, b) => a.name.localeCompare(b.name, 'id', { sensitivity: 'base' }))
+    : students;
+  const totalPages = Math.max(1, Math.ceil(orderedStudents.length / 10));
+
+  orderedStudents.forEach((stu, idx) => {
+    const posOnPage = idx % 10;
+    if (idx > 0 && posOnPage === 0) {
+      doc.addPage();
+    }
+    if (singleClassLabel && posOnPage === 0) {
+      const pageNum = Math.floor(idx / 10) + 1;
+      drawParticipantPageClassHeader(
+        doc,
+        singleClassLabel,
+        orderedStudents.length,
+        pageNum,
+        totalPages,
+        settings
+      );
+    }
+    renderCard(stu, posOnPage);
   });
 
-  doc.save(`Kartu_Peserta_QR_CandyCBT_${new Date().toISOString().slice(0, 10)}.pdf`);
+  if (singleClassLabel) {
+    doc.save(`Kartu_Peserta_${toSafePdfSlug(singleClassLabel)}_${today}.pdf`);
+  } else {
+    doc.save(`Kartu_Peserta_QR_CandyCBT_${today}.pdf`);
+  }
 }
 
 export function generateAttendancePDF(

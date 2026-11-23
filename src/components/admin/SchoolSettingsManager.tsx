@@ -218,9 +218,11 @@ export const SchoolSettingsManager: React.FC<SchoolSettingsManagerProps> = ({
         method: 'PUT',
         body: JSON.stringify(form),
       });
-      setForm(res.settings);
-      applyCbtTheme(res.settings.themeColor);
-      onSettingsUpdated(res.settings);
+      if (res?.settings) {
+        setForm(res.settings);
+        applyCbtTheme(res.settings.themeColor);
+        onSettingsUpdated(res.settings);
+      }
       setNotice('Profil sekolah, tema tampilan, logo, dan TTD Kepala Sekolah berhasil disimpan.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menyimpan pengaturan sekolah.');

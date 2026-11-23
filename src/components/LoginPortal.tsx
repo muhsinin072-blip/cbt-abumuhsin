@@ -47,15 +47,15 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
   const [slidePaused, setSlidePaused] = useState(false);
   const [failedSlides, setFailedSlides] = useState<Record<number, boolean>>({});
 
-  const schoolName = publicInfo?.settings.schoolName || 'SMK NEGERI 1 NUSANTARA';
-  const schoolLogo = publicInfo?.settings.schoolLogo || '';
-  const academicYear = publicInfo?.settings.academicYear || '2026/2027';
-  const semester = publicInfo?.settings.semester || 'Ganjil';
-  const maintenanceMode = publicInfo?.settings.maintenanceMode ?? false;
+  const schoolName = publicInfo?.settings?.schoolName || 'SMK NEGERI 1 NUSANTARA';
+  const schoolLogo = publicInfo?.settings?.schoolLogo || '';
+  const academicYear = publicInfo?.settings?.academicYear || '2026/2027';
+  const semester = publicInfo?.settings?.semester || 'Ganjil';
+  const maintenanceMode = publicInfo?.settings?.maintenanceMode ?? false;
   const adminSetupRequired = publicInfo?.adminSetupRequired ?? false;
 
   const slides = useMemo(() => {
-    const custom = publicInfo?.settings.portalSlides?.filter((s) => Boolean(s)) || [];
+    const custom = publicInfo?.settings?.portalSlides?.filter((s) => Boolean(s)) || [];
     if (custom.length > 0) {
       return custom.map((src, idx) => ({
         src,
@@ -63,7 +63,7 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
       }));
     }
     return DEFAULT_PORTAL_SLIDES;
-  }, [publicInfo?.settings.portalSlides, schoolName]);
+  }, [publicInfo?.settings?.portalSlides, schoolName]);
 
   useEffect(() => {
     setSlideIndex(0);
@@ -359,7 +359,7 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
               <div>
                 <p className="text-slate-300/80">Server</p>
                 <p className="font-mono font-semibold text-white mt-0.5 tabular-nums">
-                  {publicInfo?.settings.serverName || 'SRV-CBT-01'}
+                  {publicInfo?.settings?.serverName || 'SRV-CBT-01'}
                 </p>
               </div>
               <div>
@@ -371,7 +371,7 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
               <div>
                 <p className="text-slate-300/80">NPSN</p>
                 <p className="font-mono font-semibold text-white mt-0.5 tabular-nums">
-                  {publicInfo?.settings.npsn || '20261901'}
+                  {publicInfo?.settings?.npsn || '20261901'}
                 </p>
               </div>
             </div>

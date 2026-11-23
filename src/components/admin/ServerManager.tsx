@@ -111,7 +111,9 @@ export const ServerManager: React.FC<ServerManagerProps> = ({ onSettingsUpdated 
     try {
       const res = await apiFetch<ServerStatusResponse>('/api/admin/server-status');
       setMetrics(res.metrics);
-      setSettings(res.settings);
+      if (res?.settings) {
+        setSettings(res.settings);
+      }
       if (res.counts) {
         setCounts(res.counts);
       }
@@ -248,12 +250,14 @@ export const ServerManager: React.FC<ServerManagerProps> = ({ onSettingsUpdated 
     setSaving(true);
     setError('');
     try {
-      const res = await apiFetch<{ settings: SchoolSettings }>('/api/admin/settings', {
+      const res = await apiFetch<{ settings?: SchoolSettings }>('/api/admin/settings', {
         method: 'PUT',
         body: JSON.stringify(settings),
       });
-      setSettings(res.settings);
-      onSettingsUpdated(res.settings);
+      if (res?.settings) {
+        setSettings(res.settings);
+        onSettingsUpdated(res.settings);
+      }
       setNotice('Profil sekolah dan konfigurasi server berhasil disimpan.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menyimpan pengaturan.');

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   BookOpen,
@@ -63,6 +63,27 @@ interface AdminLayoutProps {
   onLogout: () => void;
 }
 
+const FALLBACK_SETTINGS: SchoolSettings = {
+  schoolName: 'SMK NEGERI 1 NUSANTARA',
+  npsn: '20261901',
+  address: 'Jl. Pendidikan Raya No. 45, Kota Nusantara',
+  city: 'Kota Nusantara',
+  academicYear: '2026/2027',
+  semester: 'Ganjil',
+  principalName: 'Drs. H. Ahmad Subarjo, M.M.',
+  principalNip: '19720412 199802 1 003',
+  proctorName: 'Muhsinin, S.Kom.',
+  serverName: 'SRV-CBT-UTAMA-01',
+  maintenanceMode: false,
+  autoRotateToken: false,
+  tokenIntervalMinutes: 15,
+  themeColor: 'teal',
+  sidebarStyle: 'dark',
+  schoolLogo: '',
+  principalSignature: '',
+  portalSlides: [],
+};
+
 export const AdminLayout: React.FC<AdminLayoutProps> = ({
   user,
   initialSettings,
@@ -70,35 +91,49 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   onLogout,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
-  const [settings, setSettings] = useState<SchoolSettings>(initialSettings);
+  const [settings, setSettings] = useState<SchoolSettings>(() => ({
+    ...FALLBACK_SETTINGS,
+    ...(initialSettings || {}),
+  }));
   const [dashboard, setDashboard] = useState<AdminDashboardResponse | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [csvExporting, setCsvExporting] = useState<'attendance' | 'results' | 'combined' | null>(null);
   const [csvNotice, setCsvNotice] = useState('');
   const [csvError, setCsvError] = useState('');
 
-  const handleSettingsUpdate = useCallback(
-    (next: SchoolSettings) => {
-      setSettings(next);
-      applyCbtTheme(next.themeColor);
-      onSettingsSync?.(next);
-    },
-    [onSettingsSync]
-  );
+  const settingsRef = useRef<SchoolSettings>(settings);
+  settingsRef.current = settings;
+  const onSettingsSyncRef = useRef(onSettingsSync);
+  onSettingsSyncRef.current = onSettingsSync;
+
+  const handleSettingsUpdate = useCallback((next?: Partial<SchoolSettings> | null) => {
+    if (!next || typeof next !== 'object') return;
+    const merged: SchoolSettings = {
+      ...FALLBACK_SETTINGS,
+      ...(settingsRef.current || {}),
+      ...next,
+    };
+    settingsRef.current = merged;
+    setSettings(merged);
+    applyCbtTheme(merged.themeColor);
+    onSettingsSyncRef.current?.(merged);
+  }, []);
 
   const loadDashboard = useCallback(async () => {
     try {
       const data = await apiFetch<AdminDashboardResponse>('/api/admin/dashboard');
       setDashboard(data);
-      handleSettingsUpdate(data.settings);
+      if (data?.settings) {
+        handleSettingsUpdate(data.settings);
+      }
     } catch {
       // handled per sub-module
     }
   }, [handleSettingsUpdate]);
 
   useEffect(() => {
-    applyCbtTheme(settings.themeColor);
-  }, [settings.themeColor]);
+    applyCbtTheme(settings?.themeColor);
+  }, [settings?.themeColor]);
 
   useEffect(() => {
     if (activeTab === 'overview') {
@@ -108,8 +143,8 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
 
   useEffect(() => {
     const ws = createCbtWebSocket((event, payload) => {
-      if (event === 'sync:settings' && payload) {
-        handleSettingsUpdate(payload as SchoolSettings);
+      if (event === 'sync:settings' && payload && typeof payload === 'object') {
+        handleSettingsUpdate(payload as Partial<SchoolSettings>);
       } else if (
         activeTab === 'overview' &&
         (event === 'sync:banks' ||
@@ -177,9 +212,9 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   ];
 
   const activeTitle = navItems.find((i) => i.id === activeTab)?.label || 'Beranda Proktor';
-  const isLightSidebar = settings.sidebarStyle === 'light';
+  const isLightSidebar = settings?.sidebarStyle === 'light';
 
-  const brandBadge = settings.schoolLogo ? (
+  const brandBadge = settings?.schoolLogo ? (
     <img
       src={settings.schoolLogo}
       alt="Logo Sekolah"

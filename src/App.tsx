@@ -43,7 +43,7 @@ export default function App() {
     try {
       const info = await apiFetch<PublicInfoResponse>('/api/public/info');
       setPublicInfo(info);
-      applyCbtTheme(info.settings.themeColor);
+      applyCbtTheme(info?.settings?.themeColor);
     } catch {
       // fallback to default info if network error occurs
     } finally {
@@ -88,8 +88,8 @@ export default function App() {
     return (
       <StudentDashboard
         user={user}
-        schoolName={publicInfo?.settings.schoolName || DEFAULT_SETTINGS.schoolName}
-        schoolLogo={publicInfo?.settings.schoolLogo}
+        schoolName={publicInfo?.settings?.schoolName || DEFAULT_SETTINGS.schoolName}
+        schoolLogo={publicInfo?.settings?.schoolLogo}
         onLogout={handleLogout}
       />
     );
@@ -97,10 +97,11 @@ export default function App() {
 
   const mergedSettings: SchoolSettings = {
     ...DEFAULT_SETTINGS,
-    ...publicInfo?.settings,
+    ...(publicInfo?.settings || {}),
   };
 
-  const handleSettingsSync = (next: SchoolSettings) => {
+  const handleSettingsSync = (next?: SchoolSettings | null) => {
+    if (!next || typeof next !== 'object') return;
     applyCbtTheme(next.themeColor);
     setPublicInfo((prev) =>
       prev

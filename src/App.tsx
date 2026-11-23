@@ -8,7 +8,7 @@ import { AdminLayout } from './components/admin/AdminLayout';
 import { LoginPortal } from './components/LoginPortal';
 import { StudentDashboard } from './components/student/StudentDashboard';
 import { TeacherLayout } from './components/teacher/TeacherLayout';
-import { apiFetch, clearAuthToken } from './lib/api';
+import { apiFetch, clearAuthToken, getAuthToken, setUnauthorizedHandler } from './lib/api';
 import type { PublicInfoResponse } from './lib/api';
 import { applyCbtTheme } from './lib/theme';
 import type { AuthUser, SchoolSettings } from './types/cbt';
@@ -48,19 +48,55 @@ export default function App() {
       applyCbtTheme(info?.settings?.themeColor);
     } catch (err) {
       setStartupError(err instanceof Error ? err.message : '');
-    } finally {
-      setLoadingInfo(false);
     }
   }, []);
 
   useEffect(() => {
-    loadPublicInfo();
+    setUnauthorizedHandler((msg) => {
+      setUser((prevUser) => {
+        if (prevUser) {
+          setStartupError(msg || 'Sesi login berakhir. Silakan login kembali.');
+        }
+        return null;
+      });
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const bootstrap = async () => {
+      await loadPublicInfo();
+      const storedToken = getAuthToken();
+      if (storedToken) {
+        try {
+          const me = await apiFetch<{ user: AuthUser }>('/api/auth/me');
+          if (active && me?.user) {
+            setUser(me.user);
+            setStartupError('');
+          }
+        } catch {
+          clearAuthToken();
+          if (active) {
+            setUser(null);
+          }
+        }
+      }
+      if (active) {
+        setLoadingInfo(false);
+      }
+    };
+    void bootstrap();
+    return () => {
+      active = false;
+    };
   }, [loadPublicInfo]);
 
   const handleLogout = () => {
     clearAuthToken();
     setUser(null);
-    loadPublicInfo();
+    setStartupError('');
+    void loadPublicInfo();
   };
 
   if (loadingInfo && !publicInfo) {
@@ -82,7 +118,10 @@ export default function App() {
         publicInfo={publicInfo}
         startupError={startupError}
         onRetryConnection={() => loadPublicInfo()}
-        onLoginSuccess={(loggedInUser) => setUser(loggedInUser)}
+        onLoginSuccess={(loggedInUser) => {
+          setStartupError('');
+          setUser(loggedInUser);
+        }}
         onAdminClaimed={() => loadPublicInfo()}
       />
     );

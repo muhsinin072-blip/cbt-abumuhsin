@@ -10,6 +10,7 @@ import {
   generateViolationsPDF,
 } from '../../lib/pdf';
 import type { UserRole } from '../../types/cbt';
+import { ScoreDistributionChart } from './ScoreDistributionChart';
 
 interface HasilLaporanProps {
   userRole?: UserRole;
@@ -267,6 +268,17 @@ export const HasilLaporan: React.FC<HasilLaporanProps> = ({ userRole = 'admin' }
           </p>
         </div>
       </div>
+
+      {/* Recharts Visual Distribution & Class Comparison */}
+      {data && (
+        <ScoreDistributionChart
+          exams={data.exams}
+          sessions={data.results}
+          selectedExamId={selectedExamId}
+          onExamChange={(nextExamId) => setSelectedExamId(nextExamId)}
+          title="Grafik Distribusi Nilai & Ketuntasan KKM"
+        />
+      )}
 
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">

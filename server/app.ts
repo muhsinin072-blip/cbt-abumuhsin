@@ -7,6 +7,7 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   hashPassword,
   initSigningSecret,
+  refreshAuthTokenIfNeeded,
   signAuthToken,
   verifyAuthToken,
   verifyEnvPasscode,
@@ -183,8 +184,16 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const payload = verifyAuthToken(token);
   if (!payload) {
-    res.status(401).json({ error: 'Sesi tidak valid atau telah kedaluwarsa. Silakan login kembali.' });
+    res.status(401).json({
+      error: 'Sesi tidak valid atau telah kedaluwarsa. Silakan login kembali.',
+      code: 'SESSION_EXPIRED',
+    });
     return;
+  }
+  const refreshed = refreshAuthTokenIfNeeded(payload);
+  if (refreshed) {
+    res.setHeader('X-Refreshed-Token', refreshed);
+    res.setHeader('Access-Control-Expose-Headers', 'X-Refreshed-Token');
   }
   req.user = payload;
   next();
@@ -1089,6 +1098,11 @@ app.get('/api/admin/dashboard', requireAuth, requireStaff, (req: AuthenticatedRe
   const db = store.getDb();
   const baseMetrics = buildServerMetrics();
 
+  const bankKkmMap: Record<string, number> = {};
+  for (const b of db.banks) {
+    bankKkmMap[b.id] = b.kkm ?? 75;
+  }
+
   if (isGuruUser(req.user)) {
     const ownedBankIds = getOwnedBankIds(db, req.user!);
     const ownedBanks = db.banks.filter((b) => ownedBankIds.has(b.id));
@@ -1108,6 +1122,7 @@ app.get('/api/admin/dashboard', requireAuth, requireStaff, (req: AuthenticatedRe
       },
       exams: ownedExams,
       banksCount: ownedBanks.length,
+      bankKkmMap,
       sessions: ownedSessions,
       recentViolations: ownedViolations.slice(0, 20),
       broadcasts: db.broadcasts.slice(0, 10),
@@ -1120,6 +1135,7 @@ app.get('/api/admin/dashboard', requireAuth, requireStaff, (req: AuthenticatedRe
     metrics: baseMetrics,
     exams: db.exams,
     banksCount: db.banks.length,
+    bankKkmMap,
     sessions: db.sessions,
     recentViolations: db.violations.slice(0, 20),
     broadcasts: db.broadcasts.slice(0, 10),

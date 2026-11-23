@@ -80,7 +80,7 @@ export interface TokenPayload {
   exp: number;
 }
 
-export function signAuthToken(payload: Omit<TokenPayload, 'exp'>, ttlHours = 12): string {
+export function signAuthToken(payload: Omit<TokenPayload, 'exp'>, ttlHours = 24): string {
   const fullPayload: TokenPayload = {
     ...payload,
     exp: Date.now() + ttlHours * 60 * 60 * 1000,
@@ -91,6 +91,20 @@ export function signAuthToken(payload: Omit<TokenPayload, 'exp'>, ttlHours = 12)
     .update(encoded)
     .digest('base64url');
   return `${encoded}.${signature}`;
+}
+
+const SLIDING_REFRESH_THRESHOLD_MS = 12 * 60 * 60 * 1000;
+
+export function refreshAuthTokenIfNeeded(payload: TokenPayload): string | null {
+  if (payload.exp - Date.now() > SLIDING_REFRESH_THRESHOLD_MS) {
+    return null;
+  }
+  return signAuthToken({
+    sub: payload.sub,
+    role: payload.role,
+    name: payload.name,
+    identifier: payload.identifier,
+  });
 }
 
 export function verifyAuthToken(token: string): TokenPayload | null {

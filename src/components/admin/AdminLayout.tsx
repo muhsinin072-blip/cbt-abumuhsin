@@ -40,6 +40,7 @@ import { LiveMonitoring } from './LiveMonitoring';
 import { PembelajaranManager } from './PembelajaranManager';
 import { PesertaManager } from './PesertaManager';
 import { SchoolSettingsManager } from './SchoolSettingsManager';
+import { ScoreDistributionChart } from './ScoreDistributionChart';
 import { ServerManager } from './ServerManager';
 import { TeachersManager } from './TeachersManager';
 
@@ -558,6 +559,14 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {/* Visual Score Distribution & Class Performance Chart (Recharts) */}
+                  <ScoreDistributionChart
+                    exams={dashboard.exams}
+                    sessions={dashboard.sessions}
+                    bankKkmMap={dashboard.bankKkmMap}
+                    onOpenResults={() => setActiveTab('results')}
+                  />
 
                   {/* Structured CSV Backup & Record-Keeping Panel */}
                   <section className="cbt-soft-panel rounded-xl p-6 space-y-4">

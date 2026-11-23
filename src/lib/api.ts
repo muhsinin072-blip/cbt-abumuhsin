@@ -14,10 +14,38 @@ import type {
   ViolationLog,
 } from '../types/cbt';
 
-let memoryToken = '';
+const TOKEN_STORAGE_KEY = 'candycbt_tab_token';
+
+function readStoredToken(): string {
+  try {
+    return typeof window !== 'undefined' ? window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || '' : '';
+  } catch {
+    return '';
+  }
+}
+
+let memoryToken = readStoredToken();
+let unauthorizedHandler: ((message: string) => void) | null = null;
+let unauthorizedNotifiedForToken = '';
+
+export function setUnauthorizedHandler(handler: ((message: string) => void) | null): void {
+  unauthorizedHandler = handler;
+}
 
 export function setAuthToken(token: string): void {
   memoryToken = token;
+  unauthorizedNotifiedForToken = '';
+  try {
+    if (typeof window !== 'undefined') {
+      if (token) {
+        window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+      } else {
+        window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+      }
+    }
+  } catch {
+    // ignore storage restriction inside sandboxed iframes
+  }
 }
 
 export function getAuthToken(): string {
@@ -26,9 +54,43 @@ export function getAuthToken(): string {
 
 export function clearAuthToken(): void {
   memoryToken = '';
+  unauthorizedNotifiedForToken = '';
+  try {
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage restriction
+  }
 }
 
 const TRANSIENT_HTTP_STATUS = new Set([502, 503, 504]);
+
+function isLoginEndpoint(url: string): boolean {
+  return (
+    url.startsWith('/api/auth/admin/login') ||
+    url.startsWith('/api/auth/admin/setup') ||
+    url.startsWith('/api/auth/student/login') ||
+    url.startsWith('/api/auth/teacher/login')
+  );
+}
+
+function handleUnauthorizedResponse(url: string, errMsg: string): void {
+  if (isLoginEndpoint(url) || !memoryToken) {
+    return;
+  }
+  const staleToken = memoryToken;
+  clearAuthToken();
+  if (realtimeTimer !== null) {
+    window.clearTimeout(realtimeTimer);
+    realtimeTimer = null;
+  }
+  setRealtimeConnected(false);
+  if (unauthorizedNotifiedForToken !== staleToken) {
+    unauthorizedNotifiedForToken = staleToken;
+    unauthorizedHandler?.(errMsg);
+  }
+}
 
 function delayMs(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -53,11 +115,20 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
         headers,
       });
 
+      const refreshedToken = res.headers.get('x-refreshed-token');
+      if (refreshedToken && memoryToken) {
+        setAuthToken(refreshedToken);
+      }
+
       const contentType = res.headers.get('content-type') || '';
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
           const errMsg = data?.error || `Terjadi kesalahan server (${res.status})`;
+          if (res.status === 401) {
+            handleUnauthorizedResponse(url, errMsg);
+            throw new Error(errMsg);
+          }
           const shouldRetry = data?.retryable !== false && TRANSIENT_HTTP_STATUS.has(res.status);
           if (attempt < maxAttempts - 1 && shouldRetry) {
             lastError = new Error(errMsg);
@@ -71,6 +142,10 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
 
       if (!res.ok) {
         const errMsg = `Permintaan gagal (${res.status})`;
+        if (res.status === 401) {
+          handleUnauthorizedResponse(url, 'Sesi tidak valid atau telah kedaluwarsa. Silakan login kembali.');
+          throw new Error(errMsg);
+        }
         if (attempt < maxAttempts - 1 && TRANSIENT_HTTP_STATUS.has(res.status)) {
           lastError = new Error(errMsg);
           await delayMs(250 * (attempt + 1) + Math.floor(Math.random() * 200));
@@ -276,6 +351,7 @@ export interface AdminDashboardResponse {
   metrics: ServerMetrics;
   exams: ExamSchedule[];
   banksCount: number;
+  bankKkmMap?: Record<string, number>;
   sessions: ExamSession[];
   recentViolations: ViolationLog[];
   broadcasts: BroadcastNotice[];

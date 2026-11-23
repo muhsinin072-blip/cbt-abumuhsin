@@ -442,7 +442,7 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
                 className="mb-5 p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium space-y-2"
               >
                 <p>{error || startupError}</p>
-                {!error && startupError && onRetryConnection && (
+                {!error && !publicInfo && startupError && onRetryConnection && (
                   <button
                     type="button"
                     onClick={onRetryConnection}
